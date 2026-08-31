@@ -81,17 +81,7 @@ class CloudDriveRangeSource:
             raise ConfigurationError(
                 f"expected a file but received a directory: {self.remote_path}"
             )
-        hashes = {str(key): str(value).lower() for key, value in remote.fileHashes.items()}
-        provider = remote.CloudAPI.name or "CloudDrive"
-        return RemoteAsset(
-            provider=provider,
-            remote_id=remote.id,
-            remote_path=self.remote_path,
-            name=remote.name,
-            size_bytes=int(remote.size),
-            write_time=_timestamp_text(remote.writeTime),
-            file_hashes=hashes,
-        )
+        return _remote_asset(remote, self.remote_path)
 
     def read_range(self, start: int, length: int) -> bytes:
         if start < 0 or length <= 0:
@@ -159,6 +149,58 @@ class CloudDriveRangeSource:
         return f"{self.http_scheme}://{self.endpoint}{relative}"
 
 
+class CloudDriveCatalog:
+    """Lists remote directory metadata without opening file bodies."""
+
+    def __init__(
+        self,
+        *,
+        endpoint: str = DEFAULT_CLOUDDRIVE_ENDPOINT,
+        plist_path: Path = DEFAULT_CLOUDDRIVE_PLIST,
+    ) -> None:
+        self.endpoint, self.http_scheme = _normalize_endpoint(endpoint)
+        self.plist_path = plist_path.expanduser()
+        self._token = _load_device_token(self.plist_path)
+
+    def _client(self):
+        from clouddrive2_client import CloudDriveClient
+
+        client = CloudDriveClient(self.endpoint)
+        client.jwt_token = self._token
+        return client
+
+    def list_directory(
+        self,
+        remote_path: str,
+        *,
+        extensions: set[str] | None = None,
+        force_refresh: bool = False,
+        limit: int | None = None,
+    ) -> list[RemoteAsset]:
+        normalized_extensions = (
+            {extension.lower().lstrip(".") for extension in extensions}
+            if extensions is not None
+            else None
+        )
+        client = self._client()
+        try:
+            entries = list(client.get_sub_files(remote_path, force_refresh=force_refresh))
+        finally:
+            client.close()
+        assets: list[RemoteAsset] = []
+        for remote in sorted(entries, key=lambda entry: entry.name.casefold()):
+            if remote.isDirectory:
+                continue
+            full_path = remote.fullPathName or f"{remote_path.rstrip('/')}/{remote.name}"
+            asset = _remote_asset(remote, full_path)
+            if normalized_extensions is not None and asset.extension not in normalized_extensions:
+                continue
+            assets.append(asset)
+            if limit is not None and len(assets) >= limit:
+                break
+        return assets
+
+
 class MemoryRangeSource:
     """Deterministic in-memory provider used by automated tests."""
 
@@ -206,3 +248,18 @@ def _timestamp_text(timestamp: object) -> str | None:
     from datetime import UTC, datetime
 
     return datetime.fromtimestamp(seconds + nanos / 1_000_000_000, UTC).isoformat()
+
+
+def _remote_asset(remote: object, fallback_path: str) -> RemoteAsset:
+    hashes = {str(key): str(value).lower() for key, value in remote.fileHashes.items()}
+    cloud_api = remote.CloudAPI
+    provider = cloud_api.name or "CloudDrive"
+    return RemoteAsset(
+        provider=provider,
+        remote_id=str(remote.id),
+        remote_path=str(remote.fullPathName or fallback_path),
+        name=str(remote.name),
+        size_bytes=int(remote.size),
+        write_time=_timestamp_text(remote.writeTime),
+        file_hashes=hashes,
+    )

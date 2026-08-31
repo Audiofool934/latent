@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .models import CacheEntry, PipelineResult, ProbeResult, RemoteAsset
+from .models import CacheEntry, PipelineResult, PreviewJob, ProbeResult, RemoteAsset
 
 GIB = 1024**3
 DEFAULT_CACHE_BUDGETS = {
@@ -110,6 +110,23 @@ class StateStore:
                 elapsed_ms INTEGER NOT NULL,
                 archive_modified INTEGER NOT NULL DEFAULT 0 CHECK(archive_modified = 0)
             );
+
+            CREATE TABLE IF NOT EXISTS preview_jobs (
+                id INTEGER PRIMARY KEY,
+                asset_id INTEGER NOT NULL UNIQUE REFERENCES assets(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'succeeded', 'failed')),
+                priority INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                claimed_at TEXT,
+                finished_at TEXT,
+                last_error TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_preview_jobs_claim
+            ON preview_jobs(status, priority DESC, id ASC);
             """
         )
         self._ensure_column(
@@ -316,6 +333,134 @@ class StateStore:
         )
         self.connection.commit()
 
+    def enqueue_preview_job(
+        self,
+        asset_id: int,
+        fingerprint: str,
+        *,
+        priority: int = 0,
+        retry_failed: bool = False,
+    ) -> bool:
+        row = self.connection.execute(
+            "SELECT fingerprint, status FROM preview_jobs WHERE asset_id=?",
+            (asset_id,),
+        ).fetchone()
+        now = utc_now()
+        if row is None:
+            self.connection.execute(
+                """
+                INSERT INTO preview_jobs (
+                    asset_id, fingerprint, status, priority, attempts,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'pending', ?, 0, ?, ?)
+                """,
+                (asset_id, fingerprint, priority, now, now),
+            )
+            self.connection.commit()
+            return True
+        fingerprint_changed = str(row["fingerprint"]) != fingerprint
+        should_retry = str(row["status"]) == "failed" and retry_failed
+        if not fingerprint_changed and not should_retry:
+            return False
+        self.connection.execute(
+            """
+            UPDATE preview_jobs SET
+                fingerprint=?, status='pending', priority=?, attempts=0,
+                updated_at=?, claimed_at=NULL, finished_at=NULL, last_error=NULL
+            WHERE asset_id=?
+            """,
+            (fingerprint, priority, now, asset_id),
+        )
+        self.connection.commit()
+        return True
+
+    def claim_preview_job(self) -> PreviewJob | None:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT j.id, j.asset_id, j.fingerprint, j.attempts, j.priority,
+                       a.remote_path
+                FROM preview_jobs AS j
+                JOIN assets AS a ON a.id = j.asset_id
+                WHERE j.status='pending'
+                ORDER BY j.priority DESC, j.id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            now = utc_now()
+            self.connection.execute(
+                """
+                UPDATE preview_jobs SET
+                    status='running', attempts=attempts + 1,
+                    claimed_at=?, updated_at=?, last_error=NULL
+                WHERE id=? AND status='pending'
+                """,
+                (now, now, row["id"]),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return PreviewJob(
+            id=int(row["id"]),
+            asset_id=int(row["asset_id"]),
+            remote_path=str(row["remote_path"]),
+            fingerprint=str(row["fingerprint"]),
+            attempts=int(row["attempts"]) + 1,
+            priority=int(row["priority"]),
+        )
+
+    def finish_preview_job(
+        self,
+        job_id: int,
+        *,
+        succeeded: bool,
+        fingerprint: str,
+        error: str | None = None,
+    ) -> None:
+        now = utc_now()
+        self.connection.execute(
+            """
+            UPDATE preview_jobs SET
+                fingerprint=?, status=?, updated_at=?, finished_at=?, last_error=?
+            WHERE id=? AND status='running'
+            """,
+            (
+                fingerprint,
+                "succeeded" if succeeded else "failed",
+                now,
+                now,
+                error[:1000] if error else None,
+                job_id,
+            ),
+        )
+        self.connection.commit()
+
+    def requeue_running_preview_jobs(self, *, before: str) -> int:
+        cursor = self.connection.execute(
+            """
+            UPDATE preview_jobs SET
+                status='pending', updated_at=?, claimed_at=NULL,
+                finished_at=NULL, last_error='worker interrupted before completion'
+            WHERE status='running' AND claimed_at < ?
+            """,
+            (utc_now(), before),
+        )
+        self.connection.commit()
+        return int(cursor.rowcount)
+
+    def preview_job_counts(self) -> dict[str, int]:
+        counts = {status: 0 for status in ("pending", "running", "succeeded", "failed")}
+        for row in self.connection.execute(
+            "SELECT status, COUNT(*) AS count FROM preview_jobs GROUP BY status"
+        ):
+            counts[str(row["status"])] = int(row["count"])
+        return counts
+
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         run_count = self.connection.execute("SELECT COUNT(*) FROM fetch_runs").fetchone()[0]
@@ -335,6 +480,7 @@ class StateStore:
             "database_integrity": integrity,
             "assets": asset_count,
             "fetch_runs": run_count,
+            "preview_jobs": self.preview_job_counts(),
             "cache": cache,
         }
 

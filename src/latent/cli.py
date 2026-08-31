@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import partial
 from pathlib import Path
 
 from .errors import LatentError
+from .jobs import DirectoryImporter, PreviewWorker
 from .preview import MIB, ExifToolProbe, PreviewPipeline
 from .provider import (
     DEFAULT_CLOUDDRIVE_ENDPOINT,
     DEFAULT_CLOUDDRIVE_PLIST,
+    CloudDriveCatalog,
     CloudDriveRangeSource,
 )
 from .storage import GIB, CacheManager, StateStore
@@ -44,6 +47,38 @@ def build_parser() -> argparse.ArgumentParser:
     spike.add_argument("--force", action="store_true", help="ignore an existing cache hit")
     spike.add_argument("--json", action="store_true", help="emit machine-readable evidence")
     spike.set_defaults(handler=_run_spike)
+
+    scan = subparsers.add_parser(
+        "scan",
+        help="catalog ARWs in one remote directory and enqueue preview jobs",
+    )
+    scan.add_argument("--path", required=True, help="CloudDrive API path to one directory")
+    scan.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    scan.add_argument("--endpoint", default=DEFAULT_CLOUDDRIVE_ENDPOINT)
+    scan.add_argument("--plist", type=Path, default=DEFAULT_CLOUDDRIVE_PLIST)
+    scan.add_argument("--limit", type=_positive_int)
+    scan.add_argument("--force-refresh", action="store_true")
+    scan.add_argument("--retry-failed", action="store_true")
+    scan.add_argument("--json", action="store_true")
+    scan.set_defaults(handler=_run_scan)
+
+    worker = subparsers.add_parser(
+        "work",
+        help="process pending preview jobs from the durable local queue",
+    )
+    worker.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    worker.add_argument("--endpoint", default=DEFAULT_CLOUDDRIVE_ENDPOINT)
+    worker.add_argument("--plist", type=Path, default=DEFAULT_CLOUDDRIVE_PLIST)
+    worker.add_argument("--max-jobs", type=_positive_int, default=25)
+    worker.add_argument("--initial-prefix-kib", type=_positive_int, default=512)
+    worker.add_argument("--maximum-prefix-mib", type=_positive_int, default=8)
+    worker.add_argument("--maximum-preview-mib", type=_positive_int, default=16)
+    worker.add_argument("--contact-budget-gib", type=_non_negative_float, default=3.0)
+    worker.add_argument("--preview-budget-gib", type=_non_negative_float, default=4.0)
+    worker.add_argument("--temporary-budget-gib", type=_non_negative_float, default=1.0)
+    worker.add_argument("--timeout-seconds", type=float, default=30.0)
+    worker.add_argument("--json", action="store_true")
+    worker.set_defaults(handler=_run_worker)
 
     status = subparsers.add_parser("status", help="inspect the local index and cache")
     status.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
@@ -107,8 +142,76 @@ def _run_status(args: argparse.Namespace) -> int:
         print(f"SQLite integrity: {payload['database_integrity']}")
         print(f"Assets: {payload['assets']}")
         print(f"Fetch runs: {payload['fetch_runs']}")
+        jobs = payload["preview_jobs"]
+        print(
+            "Preview jobs: "
+            f"{jobs['pending']} pending, {jobs['running']} running, "
+            f"{jobs['succeeded']} succeeded, {jobs['failed']} failed"
+        )
         for variant, values in payload["cache"].items():
             print(f"Cache {variant}: {values['entries']} entries, {_format_bytes(values['bytes'])}")
+    return 0
+
+
+def _run_scan(args: argparse.Namespace) -> int:
+    catalog = CloudDriveCatalog(endpoint=args.endpoint, plist_path=args.plist)
+    with StateStore(args.state_dir) as store:
+        result = DirectoryImporter(store, catalog).scan(
+            args.path,
+            limit=args.limit,
+            force_refresh=args.force_refresh,
+            retry_failed=args.retry_failed,
+        )
+        queue = store.preview_job_counts()
+    payload = result.as_dict() | {"preview_jobs": queue}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"Remote directory: {result.remote_path}")
+        print(
+            f"ARWs: {result.discovered} discovered, {result.enqueued} enqueued, "
+            f"{result.unchanged} unchanged"
+        )
+        print(f"Queue: {queue}")
+        print("Archive modified: no")
+    return 0
+
+
+def _run_worker(args: argparse.Namespace) -> int:
+    budgets = {
+        "contact": _gib(args.contact_budget_gib),
+        "preview": _gib(args.preview_budget_gib),
+        "temporary": _gib(args.temporary_budget_gib),
+    }
+    source_factory = partial(
+        CloudDriveRangeSource,
+        endpoint=args.endpoint,
+        plist_path=args.plist,
+        timeout_seconds=args.timeout_seconds,
+    )
+    with StateStore(args.state_dir) as store:
+        cache = CacheManager(store, budgets)
+        pipeline = PreviewPipeline(
+            store,
+            cache,
+            ExifToolProbe(),
+            initial_prefix_bytes=args.initial_prefix_kib * 1024,
+            maximum_prefix_bytes=args.maximum_prefix_mib * MIB,
+            maximum_preview_bytes=args.maximum_preview_mib * MIB,
+        )
+        result = PreviewWorker(store, pipeline, source_factory).run(max_jobs=args.max_jobs)
+        queue = store.preview_job_counts()
+    payload = result.as_dict() | {"preview_jobs": queue}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(
+            f"Jobs: {result.processed} processed, {result.succeeded} succeeded, "
+            f"{result.failed} failed, {result.cache_hits} cache hits"
+        )
+        print(f"Network: {_format_bytes(result.bytes_transferred)} transferred")
+        print(f"Queue: {queue}")
+        print("Archive modified: no")
     return 0
 
 
@@ -145,6 +248,20 @@ def _gib(value: float) -> int:
     if value < 0:
         raise ValueError("cache budgets cannot be negative")
     return round(value * GIB)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value cannot be negative")
+    return parsed
 
 
 def _format_bytes(value: int) -> str:

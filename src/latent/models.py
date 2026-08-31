@@ -125,3 +125,13 @@ class PipelineResult:
             "evicted_paths": [str(path) for path in self.evicted_paths],
             "archive_modified": False,
         }
+
+
+@dataclass(frozen=True)
+class PreviewJob:
+    id: int
+    asset_id: int
+    remote_path: str
+    fingerprint: str
+    attempts: int
+    priority: int
