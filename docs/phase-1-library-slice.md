@@ -108,9 +108,13 @@ HTTP 边界测试确认静态资源、JSON API 与缓存 JPEG 都能从 wheel �
 - 正常完成保存最终远端 fingerprint。
 - 失败保存截断后的安全错误文本，用户可通过新的 scan 加 `--retry-failed` 重试。
 - 超过恢复窗口的 running job 会回到 pending，支持进程退出后的继续执行。
+- Worker 启动时优先使用路径中的 `YYYY-MM-DD` 排序，缺少标准日期目录时回退到远端 write time。
+- 连续五个 job 失败时 worker 自动停止，避免 provider 断线导致整条队列被批量标记失败。
+- `Ctrl-C` 会立即把当前 running job 放回 pending，不需要等待 stale recovery 窗口。
+- `work --retry-failed` 可以把失败任务重新放回 pending。
 - 所有索引、队列和缓存均属于可重建本地状态，不改变摄影档案。
 
 ## Next step
 
-下一步是为 25,761 个 pending preview job 建立按最近日期优先的长期后台执行策略，并把吞吐量、预计剩余时间和暂停状态显示在 Library 界面。
+下一步是运行按最近日期优先的长期后台 worker，并把吞吐量、预计剩余时间和暂停状态显示在 Library 界面。
 完成首批近期日期后，再验证真实规模下的日期分页和缓存淘汰。

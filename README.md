@@ -40,6 +40,8 @@ CloudDrive device token 只从应用自己的本地 plist 读取到内存，不�
 `latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
 `scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
 只有明确传入 `--include-hidden` 才会遍历这些目录。
+`work` 在启动时按目录中的拍摄日期重新排列 pending job，较新的日期优先。
+连续五次 provider 失败会触发熔断，`Ctrl-C` 会把当前 job 安全放回 pending。
 
 ## Why Latent
 

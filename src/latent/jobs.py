@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Protocol
 
@@ -14,6 +15,8 @@ from .models import DirectoryListing, PipelineResult, RemoteAsset
 from .preview import PreviewPipeline
 from .provider import RangeSource
 from .storage import StateStore
+
+_DATE_COMPONENT = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 
 
 class Catalog(Protocol):
@@ -71,6 +74,9 @@ class WorkerRunResult:
     bytes_transferred: int = 0
     elapsed_ms: int = 0
     recovered_jobs: int = 0
+    requeued_failed_jobs: int = 0
+    reprioritized_jobs: int = 0
+    stopped_after_consecutive_failures: bool = False
     failures: list[WorkerFailure] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -82,6 +88,9 @@ class WorkerRunResult:
             "bytes_transferred": self.bytes_transferred,
             "elapsed_ms": self.elapsed_ms,
             "recovered_jobs": self.recovered_jobs,
+            "requeued_failed_jobs": self.requeued_failed_jobs,
+            "reprioritized_jobs": self.reprioritized_jobs,
+            "stopped_after_consecutive_failures": self.stopped_after_consecutive_failures,
             "failures": [failure.__dict__ for failure in self.failures],
             "archive_modified": False,
         }
@@ -315,15 +324,27 @@ class PreviewWorker:
         self.source_factory = source_factory
 
     def run(
-        self, *, max_jobs: int, stale_after: timedelta = timedelta(minutes=30)
+        self,
+        *,
+        max_jobs: int,
+        stale_after: timedelta = timedelta(minutes=30),
+        max_consecutive_failures: int = 5,
+        retry_failed: bool = False,
     ) -> WorkerRunResult:
         if max_jobs <= 0:
             raise ValueError("max_jobs must be positive")
+        if max_consecutive_failures <= 0:
+            raise ValueError("max_consecutive_failures must be positive")
         started = time.perf_counter()
         stale_before = (datetime.now(UTC) - stale_after).isoformat()
+        recovered_jobs = self.store.requeue_running_preview_jobs(before=stale_before)
+        requeued_failed_jobs = self.store.requeue_failed_preview_jobs() if retry_failed else 0
         outcome = WorkerRunResult(
-            recovered_jobs=self.store.requeue_running_preview_jobs(before=stale_before)
+            recovered_jobs=recovered_jobs,
+            requeued_failed_jobs=requeued_failed_jobs,
+            reprioritized_jobs=reprioritize_preview_jobs(self.store),
         )
+        consecutive_failures = 0
         while outcome.processed < max_jobs:
             job = self.store.claim_preview_job()
             if job is None:
@@ -340,6 +361,10 @@ class PreviewWorker:
                     fingerprint=fingerprint,
                 )
                 self._record_success(outcome, result)
+                consecutive_failures = 0
+            except KeyboardInterrupt:
+                self.store.release_preview_job(job.id)
+                raise
             except Exception as error:
                 message = f"{type(error).__name__}: {error}"
                 self.store.finish_preview_job(
@@ -350,6 +375,10 @@ class PreviewWorker:
                 )
                 outcome.failed += 1
                 outcome.failures.append(WorkerFailure(job.remote_path, message))
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    outcome.stopped_after_consecutive_failures = True
+                    break
         outcome.elapsed_ms = round((time.perf_counter() - started) * 1000)
         return outcome
 
@@ -373,3 +402,35 @@ def _filter_directories(
         if not PurePosixPath(directory).name.startswith((".", "_"))
     )
     return included, len(directories) - len(included)
+
+
+def reprioritize_preview_jobs(store: StateStore) -> int:
+    priorities = [
+        (
+            int(source["id"]),
+            _preview_priority(
+                str(source["remote_path"]),
+                str(source["write_time"]) if source["write_time"] else None,
+            ),
+        )
+        for source in store.pending_preview_job_sources()
+    ]
+    return store.update_preview_job_priorities(priorities)
+
+
+def _preview_priority(remote_path: str, write_time: str | None) -> int:
+    matches = list(_DATE_COMPONENT.finditer(remote_path))
+    for match in reversed(matches):
+        try:
+            value = date(*(int(component) for component in match.groups()))
+        except ValueError:
+            continue
+        return value.year * 10_000 + value.month * 100 + value.day
+    if write_time:
+        try:
+            value = datetime.fromisoformat(write_time).date()
+        except ValueError:
+            pass
+        else:
+            return value.year * 10_000 + value.month * 100 + value.day
+    return 0

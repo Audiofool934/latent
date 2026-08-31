@@ -488,6 +488,59 @@ class StateStore:
         )
         self.connection.commit()
 
+    def release_preview_job(self, job_id: int) -> None:
+        self.connection.execute(
+            """
+            UPDATE preview_jobs SET
+                status='pending', updated_at=?, claimed_at=NULL,
+                finished_at=NULL, last_error='worker interrupted before completion'
+            WHERE id=? AND status='running'
+            """,
+            (utc_now(), job_id),
+        )
+        self.connection.commit()
+
+    def pending_preview_job_sources(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT j.id, a.remote_path, a.write_time
+                FROM preview_jobs AS j
+                JOIN assets AS a ON a.id = j.asset_id
+                WHERE j.status='pending'
+                """
+            )
+        ]
+
+    def update_preview_job_priorities(self, priorities: list[tuple[int, int]]) -> int:
+        if not priorities:
+            return 0
+        now = utc_now()
+        self.connection.executemany(
+            """
+            UPDATE preview_jobs SET priority=?, updated_at=?
+            WHERE id=? AND status='pending'
+            """,
+            ((priority, now, job_id) for job_id, priority in priorities),
+        )
+        self.connection.commit()
+        return len(priorities)
+
+    def requeue_failed_preview_jobs(self) -> int:
+        now = utc_now()
+        cursor = self.connection.execute(
+            """
+            UPDATE preview_jobs SET
+                status='pending', updated_at=?, claimed_at=NULL,
+                finished_at=NULL, last_error=NULL
+            WHERE status='failed'
+            """,
+            (now,),
+        )
+        self.connection.commit()
+        return int(cursor.rowcount)
+
     def requeue_running_preview_jobs(self, *, before: str) -> int:
         cursor = self.connection.execute(
             """

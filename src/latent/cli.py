@@ -108,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--preview-budget-gib", type=_non_negative_float, default=4.0)
     worker.add_argument("--temporary-budget-gib", type=_non_negative_float, default=1.0)
     worker.add_argument("--timeout-seconds", type=float, default=30.0)
+    worker.add_argument("--max-consecutive-failures", type=_positive_int, default=5)
+    worker.add_argument("--retry-failed", action="store_true")
     worker.add_argument("--json", action="store_true")
     worker.set_defaults(handler=_run_worker)
 
@@ -322,7 +324,11 @@ def _run_worker(args: argparse.Namespace) -> int:
             maximum_prefix_bytes=args.maximum_prefix_mib * MIB,
             maximum_preview_bytes=args.maximum_preview_mib * MIB,
         )
-        result = PreviewWorker(store, pipeline, source_factory).run(max_jobs=args.max_jobs)
+        result = PreviewWorker(store, pipeline, source_factory).run(
+            max_jobs=args.max_jobs,
+            max_consecutive_failures=args.max_consecutive_failures,
+            retry_failed=args.retry_failed,
+        )
         queue = store.preview_job_counts()
     payload = result.as_dict() | {"preview_jobs": queue}
     if args.json:
@@ -333,6 +339,9 @@ def _run_worker(args: argparse.Namespace) -> int:
             f"{result.failed} failed, {result.cache_hits} cache hits"
         )
         print(f"Network: {_format_bytes(result.bytes_transferred)} transferred")
+        print(f"Queue ordering: {result.reprioritized_jobs} pending jobs prioritized by date")
+        if result.stopped_after_consecutive_failures:
+            print(f"Worker stopped after {args.max_consecutive_failures} consecutive failures")
         print(f"Queue: {queue}")
         print("Archive modified: no")
     return 0

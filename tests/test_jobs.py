@@ -4,9 +4,15 @@ import io
 from contextlib import nullcontext
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
-from latent.jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
+from latent.jobs import (
+    ArchiveTreeScanner,
+    DirectoryImporter,
+    PreviewWorker,
+    reprioritize_preview_jobs,
+)
 from latent.models import DirectoryListing, PreviewLocation, ProbeResult, RemoteAsset
 from latent.preview import PreviewPipeline
 from latent.provider import MemoryRangeSource
@@ -261,3 +267,87 @@ def test_failed_archive_directory_can_be_retried(tmp_path: Path) -> None:
         assert resumed.status["status"] == "completed"
         assert resumed.status["directories"]["failed"] == 0
         assert catalog.calls.count(failed_path) == 2
+
+
+def test_preview_jobs_are_reprioritized_by_archive_date(tmp_path: Path) -> None:
+    older = remote_asset("/archive/2025/2025-12-31/DSC00001.ARW", "older")
+    newer = remote_asset("/archive/2026/2026-08-29/DSC00002.ARW", "newer")
+
+    with StateStore(tmp_path) as store:
+        older_id = store.upsert_asset(older)
+        newer_id = store.upsert_asset(newer)
+        assert store.enqueue_preview_job(older_id, older.fingerprint, priority=999)
+        assert store.enqueue_preview_job(newer_id, newer.fingerprint, priority=0)
+
+        assert reprioritize_preview_jobs(store) == 2
+        claimed = store.claim_preview_job()
+
+        assert claimed is not None
+        assert claimed.remote_path == newer.remote_path
+        store.release_preview_job(claimed.id)
+
+
+def test_preview_worker_releases_current_job_when_interrupted(tmp_path: Path) -> None:
+    asset = remote_asset("/archive/2026/2026-08-29/DSC00001.ARW", "interrupt")
+
+    with StateStore(tmp_path) as store:
+        asset_id = store.upsert_asset(asset)
+        assert store.enqueue_preview_job(asset_id, asset.fingerprint)
+        pipeline = PreviewPipeline(
+            store,
+            CacheManager(store, {"preview": 10**7, "contact": 10**7, "temporary": 0}),
+            StaticProbe(0, 100),
+            initial_prefix_bytes=128,
+            maximum_prefix_bytes=512,
+        )
+
+        def interrupting_source_factory(_: str):
+            raise KeyboardInterrupt
+
+        worker = PreviewWorker(store, pipeline, interrupting_source_factory)
+        with pytest.raises(KeyboardInterrupt):
+            worker.run(max_jobs=1)
+
+        assert store.preview_job_counts() == {
+            "pending": 1,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+        }
+
+
+def test_preview_worker_stops_after_consecutive_failures(tmp_path: Path) -> None:
+    assets = [
+        remote_asset(f"/archive/2026/2026-08-29/DSC0000{index}.ARW", f"fail-{index}")
+        for index in range(1, 4)
+    ]
+
+    with StateStore(tmp_path) as store:
+        for asset in assets:
+            asset_id = store.upsert_asset(asset)
+            assert store.enqueue_preview_job(asset_id, asset.fingerprint)
+        pipeline = PreviewPipeline(
+            store,
+            CacheManager(store, {"preview": 10**7, "contact": 10**7, "temporary": 0}),
+            StaticProbe(0, 100),
+            initial_prefix_bytes=128,
+            maximum_prefix_bytes=512,
+        )
+
+        def failing_source_factory(_: str):
+            raise RuntimeError("provider unavailable")
+
+        result = PreviewWorker(store, pipeline, failing_source_factory).run(
+            max_jobs=3,
+            max_consecutive_failures=2,
+        )
+
+        assert result.processed == 2
+        assert result.failed == 2
+        assert result.stopped_after_consecutive_failures
+        assert store.preview_job_counts() == {
+            "pending": 1,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 2,
+        }
