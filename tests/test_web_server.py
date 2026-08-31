@@ -24,7 +24,11 @@ def _jpeg_bytes(size: tuple[int, int]) -> bytes:
     return output.getvalue()
 
 
-def _seed_library(state_dir: Path) -> tuple[RemoteAsset, bytes, bytes]:
+def _seed_library(
+    state_dir: Path,
+    *,
+    include_preview: bool = True,
+) -> tuple[RemoteAsset, bytes, bytes]:
     asset = RemoteAsset(
         provider="test",
         remote_id="asset-1",
@@ -63,14 +67,15 @@ def _seed_library(state_dir: Path) -> tuple[RemoteAsset, bytes, bytes]:
             width=480,
             height=320,
         )
-        cache.put(
-            asset_id=asset_id,
-            variant="preview",
-            fingerprint=asset.fingerprint,
-            data=preview,
-            width=1600,
-            height=1067,
-        )
+        if include_preview:
+            cache.put(
+                asset_id=asset_id,
+                variant="preview",
+                fingerprint=asset.fingerprint,
+                data=preview,
+                width=1600,
+                height=1067,
+            )
     return asset, contact, preview
 
 
@@ -139,6 +144,21 @@ def test_server_rejects_invalid_queries_and_cache_traversal(tmp_path: Path) -> N
         with pytest.raises(HTTPError) as traversal:
             urlopen(f"{base_url}/media/%2e%2e/index.sqlite", timeout=2)
         assert traversal.value.code == 404
+
+
+def test_contact_only_asset_remains_visible_after_preview_eviction(tmp_path: Path) -> None:
+    _, contact, _ = _seed_library(tmp_path, include_preview=False)
+
+    with _running_server(tmp_path) as base_url:
+        library, _ = _get_json(f"{base_url}/api/library")
+        assert library["cached_assets"] == 1
+
+        payload, _ = _get_json(f"{base_url}/api/assets?date=2025-12-25")
+        indexed_asset = payload["assets"][0]
+        assert indexed_asset["preview_available"] is False
+        assert indexed_asset["preview_url"] == indexed_asset["contact_url"]
+        with urlopen(f"{base_url}{indexed_asset['preview_url']}", timeout=2) as response:
+            assert response.read() == contact
 
 
 def test_loopback_detection_is_explicit() -> None:

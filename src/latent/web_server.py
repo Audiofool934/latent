@@ -100,6 +100,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _asset_payload(self, asset: dict[str, Any]) -> dict[str, Any]:
+        preview_path = asset["preview_path"] or asset["contact_path"]
         return {
             "id": asset["id"],
             "name": asset["name"],
@@ -111,7 +112,8 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             "preview_width": asset["preview_width"],
             "preview_height": asset["preview_height"],
             "contact_url": "/media/" + quote(str(asset["contact_path"]), safe="/"),
-            "preview_url": "/media/" + quote(str(asset["preview_path"]), safe="/"),
+            "preview_url": "/media/" + quote(str(preview_path), safe="/"),
+            "preview_available": asset["preview_path"] is not None,
         }
 
     def _serve_media(self, encoded_path: str) -> None:

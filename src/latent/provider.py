@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .errors import ArchiveSafetyError, ConfigurationError
-from .models import RemoteAsset
+from .models import DirectoryListing, RemoteAsset
 
 DEFAULT_CLOUDDRIVE_ENDPOINT = "127.0.0.1:29798"
 DEFAULT_CLOUDDRIVE_PLIST = Path.home() / (
@@ -177,6 +177,21 @@ class CloudDriveCatalog:
         force_refresh: bool = False,
         limit: int | None = None,
     ) -> list[RemoteAsset]:
+        listing = self.list_directory_contents(
+            remote_path,
+            extensions=extensions,
+            force_refresh=force_refresh,
+        )
+        assets = list(listing.assets)
+        return assets if limit is None else assets[:limit]
+
+    def list_directory_contents(
+        self,
+        remote_path: str,
+        *,
+        extensions: set[str] | None = None,
+        force_refresh: bool = False,
+    ) -> DirectoryListing:
         normalized_extensions = (
             {extension.lower().lstrip(".") for extension in extensions}
             if extensions is not None
@@ -188,17 +203,23 @@ class CloudDriveCatalog:
         finally:
             client.close()
         assets: list[RemoteAsset] = []
+        directories: list[str] = []
         for remote in sorted(entries, key=lambda entry: entry.name.casefold()):
             if remote.isDirectory:
+                directories.append(
+                    str(remote.fullPathName or f"{remote_path.rstrip('/')}/{remote.name}")
+                )
                 continue
             full_path = remote.fullPathName or f"{remote_path.rstrip('/')}/{remote.name}"
             asset = _remote_asset(remote, full_path)
             if normalized_extensions is not None and asset.extension not in normalized_extensions:
                 continue
             assets.append(asset)
-            if limit is not None and len(assets) >= limit:
-                break
-        return assets
+        return DirectoryListing(
+            remote_path=remote_path,
+            directories=tuple(directories),
+            assets=tuple(assets),
+        )
 
 
 class MemoryRangeSource:

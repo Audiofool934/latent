@@ -39,6 +39,13 @@ class RemoteAsset:
 
 
 @dataclass(frozen=True)
+class DirectoryListing:
+    remote_path: str
+    directories: tuple[str, ...]
+    assets: tuple[RemoteAsset, ...]
+
+
+@dataclass(frozen=True)
 class PreviewLocation:
     tag: str
     offset: int
@@ -135,3 +142,12 @@ class PreviewJob:
     fingerprint: str
     attempts: int
     priority: int
+
+
+@dataclass(frozen=True)
+class ArchiveDirectoryJob:
+    id: int
+    scan_id: int
+    remote_path: str
+    depth: int
+    attempts: int

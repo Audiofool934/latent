@@ -8,8 +8,8 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from .errors import LatentError
-from .jobs import DirectoryImporter, PreviewWorker
+from .errors import ConfigurationError, LatentError
+from .jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
 from .preview import MIB, ExifToolProbe, PreviewPipeline
 from .provider import (
     DEFAULT_CLOUDDRIVE_ENDPOINT,
@@ -62,6 +62,36 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--retry-failed", action="store_true")
     scan.add_argument("--json", action="store_true")
     scan.set_defaults(handler=_run_scan)
+
+    tree_scan = subparsers.add_parser(
+        "scan-tree",
+        help="incrementally scan an archive directory tree and enqueue ARW previews",
+    )
+    tree_source = tree_scan.add_mutually_exclusive_group(required=True)
+    tree_source.add_argument("--path", help="CloudDrive API path to an archive root")
+    tree_source.add_argument("--scan-id", type=_positive_int, help="resume an existing scan")
+    tree_scan.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    tree_scan.add_argument("--endpoint", default=DEFAULT_CLOUDDRIVE_ENDPOINT)
+    tree_scan.add_argument("--plist", type=Path, default=DEFAULT_CLOUDDRIVE_PLIST)
+    tree_scan.add_argument("--max-directories", type=_positive_int, default=25)
+    tree_scan.add_argument("--force-refresh", action="store_true")
+    tree_scan.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="include directories whose names start with a dot or underscore",
+    )
+    tree_scan.add_argument("--retry-failed", action="store_true")
+    tree_scan.add_argument("--json", action="store_true")
+    tree_scan.set_defaults(handler=_run_tree_scan)
+
+    cancel_scan = subparsers.add_parser(
+        "scan-tree-cancel",
+        help="stop a recursive scan at its next directory boundary",
+    )
+    cancel_scan.add_argument("--scan-id", type=_positive_int, required=True)
+    cancel_scan.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    cancel_scan.add_argument("--json", action="store_true")
+    cancel_scan.set_defaults(handler=_run_tree_scan_cancel)
 
     worker = subparsers.add_parser(
         "work",
@@ -165,6 +195,13 @@ def _run_status(args: argparse.Namespace) -> int:
         )
         for variant, values in payload["cache"].items():
             print(f"Cache {variant}: {values['entries']} entries, {_format_bytes(values['bytes'])}")
+        for scan in payload["archive_scans"]:
+            directories = scan["directories"]
+            print(
+                f"Archive scan #{scan['id']} {scan['status']}: "
+                f"{directories['succeeded']} succeeded, {directories['pending']} pending, "
+                f"{directories['running']} running, {directories['failed']} failed"
+            )
     return 0
 
 
@@ -188,6 +225,77 @@ def _run_scan(args: argparse.Namespace) -> int:
             f"{result.unchanged} unchanged"
         )
         print(f"Queue: {queue}")
+        print("Archive modified: no")
+    return 0
+
+
+def _run_tree_scan(args: argparse.Namespace) -> int:
+    if args.scan_id is not None and (args.force_refresh or args.include_hidden):
+        raise ConfigurationError(
+            "--force-refresh and --include-hidden are fixed when a scan starts"
+        )
+    catalog = CloudDriveCatalog(endpoint=args.endpoint, plist_path=args.plist)
+    try:
+        with StateStore(args.state_dir) as store:
+            scanner = ArchiveTreeScanner(store, catalog)
+            if args.scan_id is not None:
+                result = scanner.resume(
+                    args.scan_id,
+                    max_directories=args.max_directories,
+                    retry_failed=args.retry_failed,
+                )
+            else:
+                result = scanner.start(
+                    args.path,
+                    max_directories=args.max_directories,
+                    force_refresh=args.force_refresh,
+                    include_hidden=args.include_hidden,
+                    retry_failed=args.retry_failed,
+                )
+            queue = store.preview_job_counts()
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from error
+    payload = result.as_dict() | {"preview_jobs": queue}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        status = result.status
+        directories = status["directories"]
+        print(f"Archive scan #{result.scan_id}: {status['status']}")
+        print(f"Remote root: {result.remote_root}")
+        print(
+            f"This run: {result.processed_directories} directories, "
+            f"{result.discovered_assets} ARWs discovered, "
+            f"{result.enqueued_assets} enqueued"
+        )
+        print(
+            f"Tree: {directories['succeeded']} succeeded, {directories['pending']} pending, "
+            f"{directories['running']} running, {directories['failed']} failed"
+        )
+        print(f"Auxiliary directories excluded: {status['excluded_subdirectories']}")
+        print(f"Preview queue: {queue}")
+        print("Archive modified: no")
+    return 0
+
+
+def _run_tree_scan_cancel(args: argparse.Namespace) -> int:
+    try:
+        with StateStore(args.state_dir) as store:
+            cancelled = store.cancel_archive_scan(args.scan_id)
+            status = store.archive_scan_status(args.scan_id)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from error
+    payload = {
+        "scan_id": args.scan_id,
+        "cancelled": cancelled,
+        "status": status,
+        "archive_modified": False,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"Archive scan #{args.scan_id}: {status['status']}")
+        print("Cancellation takes effect between directory listings.")
         print("Archive modified: no")
     return 0
 

@@ -24,6 +24,7 @@ const elements = {
   metaTaken: document.querySelector("#metaTaken"),
   mobileDateSelect: document.querySelector("#mobileDateSelect"),
   previewDimensions: document.querySelector("#previewDimensions"),
+  queuedJobCount: document.querySelector("#queuedJobCount"),
   readyJobCount: document.querySelector("#readyJobCount"),
 };
 
@@ -49,6 +50,7 @@ async function boot() {
     state.dates = library.dates;
     elements.cachedAssetCount.textContent = String(library.cached_assets);
     elements.readyJobCount.textContent = String(library.preview_jobs.succeeded);
+    elements.queuedJobCount.textContent = String(library.preview_jobs.pending);
     renderDates();
     const requested = new URLSearchParams(window.location.search).get("date");
     const initialDate = state.dates.some((item) => item.capture_date === requested)
@@ -192,7 +194,9 @@ function selectAsset(index, openOverlay) {
   elements.inspectorTitle.textContent = asset.name;
   elements.inspectorImage.src = asset.preview_url;
   elements.inspectorImage.alt = `Cached preview of ${asset.name}`;
-  elements.previewDimensions.textContent = `${asset.preview_width} × ${asset.preview_height} cached preview`;
+  elements.previewDimensions.textContent = asset.preview_available
+    ? `${asset.preview_width} × ${asset.preview_height} cached preview`
+    : "Contact preview / medium preview evicted";
   elements.metaTaken.textContent = formatCaptureDate(asset.capture_at);
   elements.metaCamera.textContent = asset.camera_model || "Unknown";
   elements.metaLens.textContent = asset.lens_model || "Unknown";

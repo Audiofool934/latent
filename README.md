@@ -6,7 +6,7 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 它让沉睡在网络存储中的照片重新变得可浏览、可理解、可组织，并最终形成新的作品。
 
 项目当前已完成 Phase 0，并进入 Phase 1 的 Library slice。
-Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、日期目录扫描和可恢复任务队列。
+Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
 本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
 
 ## Phase 0 spike
@@ -24,6 +24,9 @@ CloudDrive 适配器与预览管线保持隔离，因此后续可以由 SwiftUI�
 uv sync
 uv run latent spike --path '/CloudName/path/to/photo.ARW'
 uv run latent scan --path '/CloudName/path/to/YYYY-MM-DD'
+uv run latent scan-tree --path '/CloudName/archive-root' --max-directories 25
+uv run latent scan-tree --scan-id 1 --max-directories 100
+uv run latent scan-tree-cancel --scan-id 1
 uv run latent work --max-jobs 25
 uv run latent status
 uv run latent serve
@@ -35,6 +38,8 @@ CloudDrive device token 只从应用自己的本地 plist 读取到内存，不�
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
 `latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
+`scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
+只有明确传入 `--include-hidden` 才会遍历这些目录。
 
 ## Why Latent
 
@@ -174,6 +179,7 @@ MVP 包含：
 
 完成真实档案索引、contact sheet、inspector、搜索、Sequence 和 DxO handoff。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
+完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，预览生成保留为独立、可分批恢复的后台阶段。
 
 ### Phase 2: Curator
 
