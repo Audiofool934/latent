@@ -461,6 +461,64 @@ class StateStore:
             counts[str(row["status"])] = int(row["count"])
         return counts
 
+    def library_dates(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT
+                    substr(a.capture_at, 1, 4) || '-' ||
+                    substr(a.capture_at, 6, 2) || '-' ||
+                    substr(a.capture_at, 9, 2) AS capture_date,
+                    COUNT(*) AS asset_count
+                FROM assets AS a
+                JOIN cache_entries AS contact
+                  ON contact.asset_id = a.id AND contact.variant = 'contact'
+                JOIN cache_entries AS preview
+                  ON preview.asset_id = a.id AND preview.variant = 'preview'
+                WHERE a.capture_at IS NOT NULL
+                GROUP BY capture_date
+                ORDER BY capture_date DESC
+                """
+            )
+        ]
+
+    def library_assets(
+        self,
+        *,
+        capture_date: str | None = None,
+        limit: int = 250,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        conditions = ["1 = 1"]
+        parameters: list[object] = []
+        if capture_date is not None:
+            conditions.append(
+                """
+                substr(a.capture_at, 1, 4) || '-' ||
+                substr(a.capture_at, 6, 2) || '-' ||
+                substr(a.capture_at, 9, 2) = ?
+                """
+            )
+            parameters.append(capture_date)
+        parameters.extend((limit, offset))
+        query = f"""
+            SELECT
+                a.id, a.name, a.remote_path, a.size_bytes, a.capture_at,
+                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                contact.relative_path AS contact_path,
+                preview.relative_path AS preview_path
+            FROM assets AS a
+            JOIN cache_entries AS contact
+              ON contact.asset_id = a.id AND contact.variant = 'contact'
+            JOIN cache_entries AS preview
+              ON preview.asset_id = a.id AND preview.variant = 'preview'
+            WHERE {" AND ".join(conditions)}
+            ORDER BY a.capture_at ASC, a.name ASC
+            LIMIT ? OFFSET ?
+        """
+        return [dict(row) for row in self.connection.execute(query, parameters)]
+
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         run_count = self.connection.execute("SELECT COUNT(*) FROM fetch_runs").fetchone()[0]

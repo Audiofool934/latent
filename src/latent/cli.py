@@ -18,6 +18,7 @@ from .provider import (
     CloudDriveRangeSource,
 )
 from .storage import GIB, CacheManager, StateStore
+from .web_server import serve_library
 
 DEFAULT_STATE_DIR = Path.home() / "Library/Application Support/Latent/phase0"
 
@@ -84,6 +85,20 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     status.add_argument("--json", action="store_true")
     status.set_defaults(handler=_run_status)
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="serve the cached local index as a read-only contact sheet",
+    )
+    serve.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=_port, default=8765)
+    serve.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow binding to a non-loopback interface",
+    )
+    serve.set_defaults(handler=_run_serve)
     return parser
 
 
@@ -215,6 +230,16 @@ def _run_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_serve(args: argparse.Namespace) -> int:
+    serve_library(
+        args.state_dir,
+        host=args.host,
+        port=args.port,
+        allow_remote=args.allow_remote,
+    )
+    return 0
+
+
 def _print_spike(payload: dict[str, object]) -> None:
     preview = payload["preview"]
     contact = payload["contact"]
@@ -261,6 +286,13 @@ def _non_negative_float(value: str) -> float:
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("value cannot be negative")
+    return parsed
+
+
+def _port(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0 or parsed > 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
     return parsed
 
 

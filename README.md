@@ -6,7 +6,8 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 它让沉睡在网络存储中的照片重新变得可浏览、可理解、可组织，并最终形成新的作品。
 
 项目当前已完成 Phase 0，并进入 Phase 1 的 Library slice。
-Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、日期目录扫描和可恢复任务队列，最终 GUI 技术栈仍保持开放。
+Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、日期目录扫描和可恢复任务队列。
+本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
 
 ## Phase 0 spike
 
@@ -25,6 +26,7 @@ uv run latent spike --path '/CloudName/path/to/photo.ARW'
 uv run latent scan --path '/CloudName/path/to/YYYY-MM-DD'
 uv run latent work --max-jobs 25
 uv run latent status
+uv run latent serve
 uv run pytest
 ```
 
@@ -32,6 +34,7 @@ uv run pytest
 CloudDrive device token 只从应用自己的本地 plist 读取到内存，不会写入项目、SQLite、缓存文件或命令输出。
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
+`latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
 
 ## Why Latent
 
@@ -170,7 +173,7 @@ MVP 包含：
 ### Phase 1: Library MVP
 
 完成真实档案索引、contact sheet、inspector、搜索、Sequence 和 DxO handoff。
-日期目录扫描和可恢复预览队列已经完成首轮真实验证，contact sheet 正在实现。
+日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 
 ### Phase 2: Curator
 

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Latent - Contact Sheet</title>
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#contactGrid">Skip to contact sheet</a>
+    <div class="app-shell" id="appShell">
+      <aside class="sidebar" aria-label="Library navigation">
+        <header class="brand-block">
+          <div class="brand-mark" aria-hidden="true">L</div>
+          <div>
+            <div class="brand-name">LATENT</div>
+            <div class="brand-subtitle">PHOTOGRAPHIC INDEX</div>
+          </div>
+        </header>
+
+        <section class="sidebar-section" aria-labelledby="indexLabel">
+          <div class="section-label" id="indexLabel">INDEX</div>
+          <div class="metric-row">
+            <span>Cached frames</span>
+            <strong id="cachedAssetCount">0</strong>
+          </div>
+          <div class="metric-row">
+            <span>Ready jobs</span>
+            <strong id="readyJobCount">0</strong>
+          </div>
+        </section>
+
+        <section class="sidebar-section date-section" aria-labelledby="datesLabel">
+          <div class="section-label" id="datesLabel">DATES</div>
+          <div class="date-list" id="dateList"></div>
+        </section>
+
+        <footer class="sidebar-footer">
+          <div class="local-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>LOCAL INDEX</span>
+          </div>
+          <div class="status-caption">Cloud access disabled</div>
+        </footer>
+      </aside>
+
+      <main class="workspace" id="mainContent">
+        <header class="workspace-header">
+          <div class="title-block">
+            <div class="eyebrow">ARCHIVE / <span id="dateBreadcrumb">LOADING</span></div>
+            <h1 id="dateTitle">Contact Sheet</h1>
+            <div class="title-meta">
+              <span id="frameCount">0 frames</span>
+              <span aria-hidden="true">/</span>
+              <span>Embedded RAW previews</span>
+            </div>
+          </div>
+          <div class="toolbar">
+            <label class="mobile-date-label" for="mobileDateSelect">Date</label>
+            <select id="mobileDateSelect" class="mobile-date-select"></select>
+            <label class="search-field" for="librarySearch">
+              <span class="search-icon" aria-hidden="true">/</span>
+              <span class="visually-hidden">Filter current contact sheet</span>
+              <input
+                id="librarySearch"
+                type="search"
+                placeholder="Filter frames"
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <kbd>⌘K</kbd>
+            </label>
+          </div>
+        </header>
+
+        <section class="contact-stage" aria-live="polite">
+          <div class="loading-state" id="loadingState">
+            <div class="loading-line"></div>
+            <span>Reading local index</span>
+          </div>
+          <div class="empty-state" id="emptyState" hidden>
+            <div class="empty-code">NO MATCHING FRAMES</div>
+            <p>Clear the filter or choose another indexed date.</p>
+          </div>
+          <div class="contact-grid" id="contactGrid" tabindex="-1"></div>
+        </section>
+
+        <footer class="workspace-footer">
+          <span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+          <span><kbd>/</kbd> Filter</span>
+          <span><kbd>Esc</kbd> Close inspector</span>
+        </footer>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-labelledby="inspectorTitle">
+        <header class="inspector-header">
+          <div>
+            <div class="section-label">INSPECTOR</div>
+            <h2 id="inspectorTitle">No selection</h2>
+          </div>
+          <button class="icon-button inspector-close" id="inspectorClose" type="button">
+            <span class="visually-hidden">Close inspector</span>
+            <span aria-hidden="true">×</span>
+          </button>
+        </header>
+
+        <div class="inspector-empty" id="inspectorEmpty">
+          Select a frame to inspect its cached preview and archive metadata.
+        </div>
+
+        <div class="inspector-content" id="inspectorContent" hidden>
+          <figure class="preview-frame">
+            <img id="inspectorImage" alt="">
+            <figcaption id="previewDimensions">Cached preview</figcaption>
+          </figure>
+
+          <section class="metadata-section" aria-labelledby="captureLabel">
+            <div class="section-label" id="captureLabel">CAPTURE</div>
+            <dl class="metadata-list">
+              <div><dt>Taken</dt><dd id="metaTaken">-</dd></div>
+              <div><dt>Camera</dt><dd id="metaCamera">-</dd></div>
+              <div><dt>Lens</dt><dd id="metaLens">-</dd></div>
+              <div><dt>RAW size</dt><dd id="metaSize">-</dd></div>
+            </dl>
+          </section>
+
+          <section class="metadata-section" aria-labelledby="sourceLabel">
+            <div class="section-label" id="sourceLabel">SOURCE</div>
+            <p class="archive-path" id="archivePath"></p>
+            <button class="text-button" id="copyPathButton" type="button">Copy archive path</button>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </body>
+</html>
