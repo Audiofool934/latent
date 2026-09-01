@@ -17,6 +17,7 @@ from .errors import ConfigurationError
 from .storage import StateStore
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MAX_SEARCH_LENGTH = 200
 _STATIC_FILES = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js"}
 
 
@@ -80,20 +81,34 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         capture_date = _single(query, "date")
         if capture_date is not None and _DATE_PATTERN.fullmatch(capture_date) is None:
             raise ValueError("date must use YYYY-MM-DD")
+        search_query = (_single(query, "q") or "").strip()
+        if len(search_query) > _MAX_SEARCH_LENGTH:
+            raise ValueError(f"search query must be {_MAX_SEARCH_LENGTH} characters or fewer")
         limit = _bounded_int(_single(query, "limit"), default=250, minimum=1, maximum=500)
         offset = _bounded_int(_single(query, "offset"), default=0, minimum=0, maximum=100_000)
         with StateStore(self.server.state_dir) as store:
             assets = store.library_assets(
                 capture_date=capture_date,
+                search_query=search_query or None,
                 limit=limit,
                 offset=offset,
             )
+            total = store.library_asset_count(
+                capture_date=capture_date,
+                search_query=search_query or None,
+            )
         payload = [self._asset_payload(asset) for asset in assets]
+        next_offset = offset + len(payload)
+        has_more = next_offset < total
         self._send_json(
             {
                 "date": capture_date,
+                "query": search_query,
                 "limit": limit,
                 "offset": offset,
+                "total": total,
+                "has_more": has_more,
+                "next_offset": next_offset if has_more else None,
                 "assets": payload,
                 "cloud_access": False,
             }

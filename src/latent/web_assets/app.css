@@ -473,6 +473,28 @@ kbd {
   color: var(--faint);
 }
 
+.pagination-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 52px;
+  margin: 0 20px 22px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+}
+
+.pagination-status[hidden] {
+  display: none;
+}
+
+.pagination-status .text-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .workspace-footer {
   display: flex;
   gap: 18px;
@@ -729,6 +751,10 @@ kbd {
   .contact-grid {
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     padding: 12px;
+  }
+
+  .pagination-status {
+    margin-inline: 12px;
   }
 }
 

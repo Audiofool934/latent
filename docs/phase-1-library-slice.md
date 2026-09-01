@@ -123,6 +123,22 @@ macFUSE 挂载路径只作为未来 DxO 原片 handoff 的候选通道，并需�
 Finder 双击或“打开方式”可能触发完整下载，因此不属于可接受的流式 handoff 证据。
 CloudDrive 已读取区段的本地缓存与 Latent 派生预览缓存是两个独立的空间预算。
 
+## High-volume date pagination evidence
+
+日期资产 API 现在返回筛选后的准确总数、是否仍有下一页，以及下一页 offset。
+网页首批读取 250 张，滚动接近底部或点击 Load more 时继续追加，而不是一次创建数千个图片节点。
+当前日期内的文件名、相机和镜头搜索由 SQLite 执行，因此可以命中尚未加载到 DOM 的照片。
+
+真实日期 `2025-12-13` 的验证结果为：
+
+- 日期总数 2,656 张
+- 首批返回 250 张，下一页 offset 为 250
+- 最后一批从 offset 2,500 返回 156 张
+- 页面最终包含 2,656 张卡片，Load more 自动结束
+- 对最后一批文件名的大小写不敏感搜索成功命中
+- `1440x900` 为五列布局，无页面或网格横向溢出
+- `390x844` 为两列布局，日期选择、搜索和 Inspector 开关均正常
+
 ## Queue contract
 
 - Claim 使用 SQLite `BEGIN IMMEDIATE`，避免两个 worker 同时取得同一个 job。
@@ -139,5 +155,5 @@ CloudDrive 已读取区段的本地缓存与 Latent 派生预览缓存是两个�
 
 ## Next step
 
-下一步是在真实规模下完善日期分页、搜索、Sequence 与 inspector 交互。
+下一步是增加跨日期全局搜索，并实现 Sequence 与可独立备份的 writable workspace。
 DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。

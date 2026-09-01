@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from http.server import HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import urlopen
 
 import pytest
@@ -79,6 +80,52 @@ def _seed_library(
     return asset, contact, preview
 
 
+def _seed_pageable_library(state_dir: Path) -> None:
+    contact = _jpeg_bytes((480, 320))
+    rows = (
+        ("DSC00001.ARW", "ILCE-7RM5", "FE 24mm F1.4 GM"),
+        ("DSC00002.ARW", "ILCE-7RM5", "FE 35mm F1.4 GM"),
+        ("DSC00003.ARW", "ILCE-7RM2", "FE 70-200mm F2.8 GM"),
+    )
+    with StateStore(state_dir) as store:
+        cache = CacheManager(
+            store,
+            {"contact": 10**7, "preview": 10**7, "temporary": 0},
+        )
+        for index, (name, camera, lens) in enumerate(rows, start=1):
+            asset = RemoteAsset(
+                provider="test",
+                remote_id=f"asset-{index}",
+                remote_path=f"/archive/2025/2025-12-25/{name}",
+                name=name,
+                size_bytes=70_000_000 + index,
+                write_time=f"2025-12-25T14:30:{index:02d}+08:00",
+                file_hashes={"2": f"hash-{index}"},
+            )
+            asset_id = store.upsert_asset(asset)
+            store.update_probe(
+                asset_id,
+                ProbeResult(
+                    location=PreviewLocation("PreviewImage", 512, len(contact)),
+                    metadata={
+                        "DateTimeOriginal": f"2025:12:25 14:30:{index:02d}",
+                        "Model": camera,
+                        "LensModel": lens,
+                    },
+                ),
+                width=1600,
+                height=1067,
+            )
+            cache.put(
+                asset_id=asset_id,
+                variant="contact",
+                fingerprint=asset.fingerprint,
+                data=contact,
+                width=480,
+                height=320,
+            )
+
+
 @contextmanager
 def _running_server(state_dir: Path) -> Iterator[str]:
     server: HTTPServer = LibraryServer(("127.0.0.1", 0), state_dir)
@@ -114,6 +161,9 @@ def test_server_reads_only_seeded_local_index_and_cache(tmp_path: Path) -> None:
         assert "default-src 'self'" in headers["Content-Security-Policy"]
 
         payload, _ = _get_json(f"{base_url}/api/assets?date=2025-12-25")
+        assert payload["total"] == 1
+        assert payload["has_more"] is False
+        assert payload["next_offset"] is None
         assets = payload["assets"]
         assert isinstance(assets, list)
         assert len(assets) == 1
@@ -144,6 +194,37 @@ def test_server_rejects_invalid_queries_and_cache_traversal(tmp_path: Path) -> N
         with pytest.raises(HTTPError) as traversal:
             urlopen(f"{base_url}/media/%2e%2e/index.sqlite", timeout=2)
         assert traversal.value.code == 404
+
+        query = quote("x" * 201)
+        with pytest.raises(HTTPError) as oversized_search:
+            urlopen(f"{base_url}/api/assets?date=2025-12-25&q={query}", timeout=2)
+        assert oversized_search.value.code == 400
+
+
+def test_asset_api_reports_page_boundaries_and_searches_full_date(tmp_path: Path) -> None:
+    _seed_pageable_library(tmp_path)
+
+    with _running_server(tmp_path) as base_url:
+        first, _ = _get_json(f"{base_url}/api/assets?date=2025-12-25&limit=2")
+        assert first["total"] == 3
+        assert first["has_more"] is True
+        assert first["next_offset"] == 2
+        assert [asset["name"] for asset in first["assets"]] == [
+            "DSC00001.ARW",
+            "DSC00002.ARW",
+        ]
+
+        last, _ = _get_json(f"{base_url}/api/assets?date=2025-12-25&limit=2&offset=2")
+        assert last["total"] == 3
+        assert last["has_more"] is False
+        assert last["next_offset"] is None
+        assert [asset["name"] for asset in last["assets"]] == ["DSC00003.ARW"]
+
+        search, _ = _get_json(f"{base_url}/api/assets?date=2025-12-25&q={quote('70-200MM')}")
+        assert search["query"] == "70-200MM"
+        assert search["total"] == 1
+        assert search["has_more"] is False
+        assert [asset["name"] for asset in search["assets"]] == ["DSC00003.ARW"]
 
 
 def test_contact_only_asset_remains_visible_after_preview_eviction(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
 本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
 首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
+高容量日期按 250 张一批增量加载，当前日期内的文件名、相机和镜头搜索由本地索引完成，不受单页上限影响。
 
 ## Phase 0 spike
 
@@ -190,6 +191,7 @@ MVP 包含：
 完成真实档案索引、contact sheet、inspector、搜索、Sequence 和 DxO handoff。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
+日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
 
 ### Phase 2: Curator
 

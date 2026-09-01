@@ -5,6 +5,7 @@ const elements = {
   archivePath: document.querySelector("#archivePath"),
   cachedAssetCount: document.querySelector("#cachedAssetCount"),
   contactGrid: document.querySelector("#contactGrid"),
+  contactStage: document.querySelector(".contact-stage"),
   copyPathButton: document.querySelector("#copyPathButton"),
   dateBreadcrumb: document.querySelector("#dateBreadcrumb"),
   dateList: document.querySelector("#dateList"),
@@ -17,12 +18,15 @@ const elements = {
   inspectorImage: document.querySelector("#inspectorImage"),
   inspectorTitle: document.querySelector("#inspectorTitle"),
   librarySearch: document.querySelector("#librarySearch"),
+  loadMoreButton: document.querySelector("#loadMoreButton"),
   loadingState: document.querySelector("#loadingState"),
   metaCamera: document.querySelector("#metaCamera"),
   metaLens: document.querySelector("#metaLens"),
   metaSize: document.querySelector("#metaSize"),
   metaTaken: document.querySelector("#metaTaken"),
   mobileDateSelect: document.querySelector("#mobileDateSelect"),
+  paginationProgress: document.querySelector("#paginationProgress"),
+  paginationStatus: document.querySelector("#paginationStatus"),
   previewDimensions: document.querySelector("#previewDimensions"),
   queuedJobCount: document.querySelector("#queuedJobCount"),
   readyJobCount: document.querySelector("#readyJobCount"),
@@ -30,14 +34,27 @@ const elements = {
 
 const state = {
   assets: [],
+  controller: null,
   currentDate: null,
   dates: [],
-  filtered: [],
+  hasMore: false,
+  loading: false,
+  query: "",
+  requestSerial: 0,
   selectedIndex: -1,
+  total: 0,
 };
 
-async function requestJSON(url) {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+const PAGE_SIZE = 250;
+const SEARCH_DELAY_MS = 180;
+let searchTimer = null;
+let paginationObserver = null;
+
+async function requestJSON(url, signal = undefined) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal,
+  });
   if (!response.ok) {
     throw new Error(`Local index request failed with ${response.status}`);
   }
@@ -52,6 +69,7 @@ async function boot() {
     elements.readyJobCount.textContent = String(library.preview_jobs.succeeded);
     elements.queuedJobCount.textContent = String(library.preview_jobs.pending);
     renderDates();
+    setupPaginationObserver();
     const requested = new URLSearchParams(window.location.search).get("date");
     const initialDate = state.dates.some((item) => item.capture_date === requested)
       ? requested
@@ -98,21 +116,12 @@ async function loadDate(captureDate) {
     return;
   }
   state.currentDate = captureDate;
-  elements.loadingState.hidden = false;
-  elements.emptyState.hidden = true;
-  elements.contactGrid.replaceChildren();
   elements.librarySearch.value = "";
-  closeInspector(false);
   updateDateChrome();
-  const payload = await requestJSON(`/api/assets?date=${encodeURIComponent(captureDate)}&limit=500`);
-  state.assets = payload.assets;
-  state.filtered = payload.assets;
-  state.selectedIndex = -1;
-  renderGrid();
-  elements.loadingState.hidden = true;
   const url = new URL(window.location.href);
   url.searchParams.set("date", captureDate);
   window.history.replaceState({}, "", url);
+  await resetResults("");
 }
 
 function updateDateChrome() {
@@ -131,17 +140,10 @@ function updateDateChrome() {
   elements.mobileDateSelect.value = state.currentDate || "";
 }
 
-function renderGrid() {
-  elements.contactGrid.replaceChildren();
-  elements.frameCount.textContent = `${state.filtered.length} ${state.filtered.length === 1 ? "frame" : "frames"}`;
-  elements.emptyState.hidden = state.filtered.length > 0;
-  if (state.filtered.length === 0) {
-    clearInspector();
-    return;
-  }
-
+function appendCards(startIndex) {
   const fragment = document.createDocumentFragment();
-  state.filtered.forEach((asset, index) => {
+  state.assets.slice(startIndex).forEach((asset, relativeIndex) => {
+    const index = startIndex + relativeIndex;
     const card = document.createElement("button");
     card.type = "button";
     card.className = "photo-card";
@@ -176,11 +178,119 @@ function renderGrid() {
     fragment.append(card);
   });
   elements.contactGrid.append(fragment);
-  selectAsset(0, false);
+}
+
+function setupPaginationObserver() {
+  if (!("IntersectionObserver" in window)) {
+    return;
+  }
+  paginationObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        void loadNextPage();
+      }
+    },
+    { root: elements.contactStage, rootMargin: "480px 0px" },
+  );
+  paginationObserver.observe(elements.paginationStatus);
+}
+
+async function resetResults(query) {
+  state.controller?.abort();
+  state.controller = new AbortController();
+  state.requestSerial += 1;
+  state.assets = [];
+  state.hasMore = true;
+  state.loading = false;
+  state.query = query;
+  state.selectedIndex = -1;
+  state.total = 0;
+  elements.contactGrid.replaceChildren();
+  elements.contactStage.scrollTop = 0;
+  elements.emptyState.hidden = true;
+  elements.loadingState.hidden = false;
+  elements.paginationStatus.hidden = true;
+  closeInspector(false);
+  clearInspector();
+  updateResultCounts();
+  try {
+    await loadNextPage();
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      showEmpty("LOCAL INDEX UNAVAILABLE", error.message);
+    }
+  }
+}
+
+async function loadNextPage() {
+  if (state.loading || !state.hasMore || !state.currentDate) {
+    return;
+  }
+  const serial = state.requestSerial;
+  const offset = state.assets.length;
+  const parameters = new URLSearchParams({
+    date: state.currentDate,
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+  });
+  if (state.query) {
+    parameters.set("q", state.query);
+  }
+  state.loading = true;
+  updatePaginationStatus();
+  try {
+    const payload = await requestJSON(
+      `/api/assets?${parameters.toString()}`,
+      state.controller?.signal,
+    );
+    if (serial !== state.requestSerial) {
+      return;
+    }
+    state.assets.push(...payload.assets);
+    state.total = payload.total;
+    state.hasMore = payload.has_more;
+    appendCards(offset);
+    elements.emptyState.hidden = state.assets.length > 0;
+    if (offset === 0 && state.assets.length > 0) {
+      selectAsset(0, false);
+    }
+  } finally {
+    if (serial === state.requestSerial) {
+      state.loading = false;
+      elements.loadingState.hidden = true;
+      updateResultCounts();
+      updatePaginationStatus();
+      if (state.assets.length === 0) {
+        showEmpty(
+          state.query ? "NO MATCHING FRAMES" : "NO CACHED FRAMES",
+          state.query
+            ? "Try another filename, camera, or lens."
+            : "Run the preview worker to populate the local index.",
+        );
+      }
+    }
+  }
+}
+
+function updateResultCounts() {
+  const singular = state.query ? "match" : "frame";
+  const plural = state.query ? "matches" : "frames";
+  if (state.assets.length < state.total) {
+    elements.frameCount.textContent = `${state.assets.length} of ${state.total} ${plural}`;
+  } else {
+    elements.frameCount.textContent = `${state.total} ${state.total === 1 ? singular : plural}`;
+  }
+}
+
+function updatePaginationStatus() {
+  elements.paginationStatus.hidden = !state.hasMore;
+  elements.loadMoreButton.disabled = state.loading;
+  elements.loadMoreButton.textContent = state.loading ? "Loading" : "Load more";
+  elements.paginationProgress.textContent = `${state.assets.length} of ${state.total || "…"} loaded`;
 }
 
 function selectAsset(index, openOverlay) {
-  if (index < 0 || index >= state.filtered.length) {
+  if (index < 0 || index >= state.assets.length) {
     return;
   }
   state.selectedIndex = index;
@@ -188,7 +298,7 @@ function selectAsset(index, openOverlay) {
   cards.forEach((card, cardIndex) => {
     card.setAttribute("aria-selected", cardIndex === index ? "true" : "false");
   });
-  const asset = state.filtered[index];
+  const asset = state.assets[index];
   elements.inspectorEmpty.hidden = true;
   elements.inspectorContent.hidden = false;
   elements.inspectorTitle.textContent = asset.name;
@@ -224,31 +334,31 @@ function closeInspector(restoreFocus = true) {
   }
 }
 
-function applyFilter() {
-  const query = elements.librarySearch.value.trim().toLocaleLowerCase();
-  state.filtered = query
-    ? state.assets.filter((asset) =>
-        [asset.name, asset.camera_model, asset.lens_model]
-          .filter(Boolean)
-          .some((value) => value.toLocaleLowerCase().includes(query)),
-      )
-    : state.assets;
-  state.selectedIndex = -1;
-  renderGrid();
+function scheduleSearch() {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => {
+    const query = elements.librarySearch.value.trim();
+    if (query !== state.query) {
+      void resetResults(query);
+    }
+  }, SEARCH_DELAY_MS);
 }
 
 function moveSelection(delta) {
-  if (state.filtered.length === 0) {
+  if (state.assets.length === 0) {
     return;
   }
   const next = Math.min(
-    state.filtered.length - 1,
+    state.assets.length - 1,
     Math.max(0, state.selectedIndex + delta),
   );
   selectAsset(next, false);
   const card = elements.contactGrid.querySelector(`[data-index="${next}"]`);
   card?.focus({ preventScroll: true });
   card?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (next === state.assets.length - 1 && state.hasMore) {
+    void loadNextPage();
+  }
 }
 
 function gridColumns() {
@@ -266,6 +376,7 @@ function gridColumns() {
 
 function showEmpty(code, message) {
   elements.loadingState.hidden = true;
+  elements.paginationStatus.hidden = true;
   elements.emptyState.hidden = false;
   elements.emptyState.querySelector(".empty-code").textContent = code;
   elements.emptyState.querySelector("p").textContent = message;
@@ -318,7 +429,7 @@ function formatBytes(value) {
 }
 
 async function copyArchivePath() {
-  const asset = state.filtered[state.selectedIndex];
+  const asset = state.assets[state.selectedIndex];
   if (!asset) {
     return;
   }
@@ -330,7 +441,8 @@ async function copyArchivePath() {
   }
 }
 
-elements.librarySearch.addEventListener("input", applyFilter);
+elements.librarySearch.addEventListener("input", scheduleSearch);
+elements.loadMoreButton.addEventListener("click", () => void loadNextPage());
 elements.mobileDateSelect.addEventListener("change", (event) => loadDate(event.target.value));
 elements.inspectorClose.addEventListener("click", () => closeInspector());
 elements.copyPathButton.addEventListener("click", copyArchivePath);

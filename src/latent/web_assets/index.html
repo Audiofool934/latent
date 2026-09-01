@@ -66,11 +66,12 @@
             <select id="mobileDateSelect" class="mobile-date-select"></select>
             <label class="search-field" for="librarySearch">
               <span class="search-icon" aria-hidden="true">/</span>
-              <span class="visually-hidden">Filter current contact sheet</span>
+              <span class="visually-hidden">Search the current date</span>
               <input
                 id="librarySearch"
                 type="search"
-                placeholder="Filter frames"
+                placeholder="Search this date"
+                maxlength="200"
                 autocomplete="off"
                 spellcheck="false"
               >
@@ -89,11 +90,15 @@
             <p>Clear the filter or choose another indexed date.</p>
           </div>
           <div class="contact-grid" id="contactGrid" tabindex="-1"></div>
+          <div class="pagination-status" id="paginationStatus" hidden>
+            <span id="paginationProgress">0 of 0 frames loaded</span>
+            <button class="text-button" id="loadMoreButton" type="button">Load more</button>
+          </div>
         </section>
 
         <footer class="workspace-footer">
           <span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-          <span><kbd>/</kbd> Filter</span>
+          <span><kbd>/</kbd> Search</span>
           <span><kbd>Esc</kbd> Close inspector</span>
         </footer>
       </main>

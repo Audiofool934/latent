@@ -918,20 +918,11 @@ class StateStore:
         self,
         *,
         capture_date: str | None = None,
+        search_query: str | None = None,
         limit: int = 250,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        conditions = ["1 = 1"]
-        parameters: list[object] = []
-        if capture_date is not None:
-            conditions.append(
-                """
-                substr(a.capture_at, 1, 4) || '-' ||
-                substr(a.capture_at, 6, 2) || '-' ||
-                substr(a.capture_at, 9, 2) = ?
-                """
-            )
-            parameters.append(capture_date)
+        conditions, parameters = _library_asset_filters(capture_date, search_query)
         parameters.extend((limit, offset))
         query = f"""
             SELECT
@@ -945,10 +936,29 @@ class StateStore:
             LEFT JOIN cache_entries AS preview
               ON preview.asset_id = a.id AND preview.variant = 'preview'
             WHERE {" AND ".join(conditions)}
-            ORDER BY a.capture_at ASC, a.name ASC
+            ORDER BY a.capture_at ASC, a.name ASC, a.id ASC
             LIMIT ? OFFSET ?
         """
         return [dict(row) for row in self.connection.execute(query, parameters)]
+
+    def library_asset_count(
+        self,
+        *,
+        capture_date: str | None = None,
+        search_query: str | None = None,
+    ) -> int:
+        conditions, parameters = _library_asset_filters(capture_date, search_query)
+        row = self.connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM assets AS a
+            JOIN cache_entries AS contact
+              ON contact.asset_id = a.id AND contact.variant = 'contact'
+            WHERE {" AND ".join(conditions)}
+            """,
+            parameters,
+        ).fetchone()
+        return int(row[0])
 
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
@@ -973,6 +983,35 @@ class StateStore:
             "archive_scans": self.archive_scan_summaries(),
             "cache": cache,
         }
+
+
+def _library_asset_filters(
+    capture_date: str | None,
+    search_query: str | None,
+) -> tuple[list[str], list[object]]:
+    conditions = ["1 = 1"]
+    parameters: list[object] = []
+    if capture_date is not None:
+        conditions.append(
+            """
+            substr(a.capture_at, 1, 4) || '-' ||
+            substr(a.capture_at, 6, 2) || '-' ||
+            substr(a.capture_at, 9, 2) = ?
+            """
+        )
+        parameters.append(capture_date)
+    if search_query:
+        conditions.append(
+            """
+            (
+                instr(lower(a.name), lower(?)) > 0 OR
+                instr(lower(coalesce(a.camera_model, '')), lower(?)) > 0 OR
+                instr(lower(coalesce(a.lens_model, '')), lower(?)) > 0
+            )
+            """
+        )
+        parameters.extend((search_query, search_query, search_query))
+    return conditions, parameters
 
 
 class CacheManager:
