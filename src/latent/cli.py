@@ -24,13 +24,11 @@ from .provider import (
     CloudDriveCatalog,
     CloudDriveRangeSource,
 )
+from .search import DEFAULT_SIGLIP2_MODEL_CACHE
 from .storage import GIB, CacheManager, StateStore
 from .web_server import serve_library
 
 DEFAULT_STATE_DIR = Path.home() / "Library/Application Support/Latent/phase0"
-DEFAULT_EMBEDDING_MODEL_CACHE = (
-    Path.home() / "Library/Application Support/Latent/embedding-benchmark/models/siglip2-base"
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,6 +138,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow binding to a non-loopback interface",
     )
+    serve.add_argument(
+        "--model-cache",
+        type=Path,
+        default=DEFAULT_SIGLIP2_MODEL_CACHE,
+    )
+    serve.add_argument("--embedding-dir", type=Path)
+    serve.add_argument(
+        "--semantic-device",
+        choices=("auto", "mps", "cpu"),
+        default="auto",
+    )
     serve.set_defaults(handler=_run_serve)
 
     embedding_sync = subparsers.add_parser(
@@ -170,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     embedding_build.add_argument(
         "--model-cache",
         type=Path,
-        default=DEFAULT_EMBEDDING_MODEL_CACHE,
+        default=DEFAULT_SIGLIP2_MODEL_CACHE,
     )
     embedding_build.add_argument(
         "--max-jobs",
@@ -414,6 +423,9 @@ def _run_serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         allow_remote=args.allow_remote,
+        embedding_dir=args.embedding_dir,
+        model_cache=args.model_cache,
+        semantic_device=args.semantic_device,
     )
     return 0
 

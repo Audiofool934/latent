@@ -34,6 +34,10 @@
             <span>Queue waiting</span>
             <strong id="queuedJobCount">0</strong>
           </div>
+          <div class="metric-row">
+            <span>Semantic vectors</span>
+            <strong id="embeddingReadyCount">0</strong>
+          </div>
         </section>
 
         <section class="sidebar-section date-section" aria-labelledby="datesLabel">
@@ -58,7 +62,7 @@
             <div class="title-meta">
               <span id="frameCount">0 frames</span>
               <span aria-hidden="true">/</span>
-              <span>Embedded RAW previews</span>
+              <span id="resultModeLabel">Embedded RAW previews</span>
             </div>
           </div>
           <div class="toolbar">
@@ -66,11 +70,11 @@
             <select id="mobileDateSelect" class="mobile-date-select"></select>
             <label class="search-field" for="librarySearch">
               <span class="search-icon" aria-hidden="true">/</span>
-              <span class="visually-hidden">Search the current date</span>
+              <span class="visually-hidden">Search all photos by meaning</span>
               <input
                 id="librarySearch"
                 type="search"
-                placeholder="Search this date"
+                placeholder="Search all photos by meaning"
                 maxlength="200"
                 autocomplete="off"
                 spellcheck="false"
@@ -139,6 +143,14 @@
             <div class="section-label" id="sourceLabel">SOURCE</div>
             <p class="archive-path" id="archivePath"></p>
             <button class="text-button" id="copyPathButton" type="button">Copy archive path</button>
+          </section>
+
+          <section class="metadata-section" aria-labelledby="discoverLabel">
+            <div class="section-label" id="discoverLabel">DISCOVER</div>
+            <button class="text-button discover-button" id="findSimilarButton" type="button">
+              Find visually similar
+            </button>
+            <p class="relation-evidence" id="relationEvidence" hidden></p>
           </section>
         </div>
       </aside>

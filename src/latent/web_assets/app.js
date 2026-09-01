@@ -10,7 +10,9 @@ const elements = {
   dateBreadcrumb: document.querySelector("#dateBreadcrumb"),
   dateList: document.querySelector("#dateList"),
   dateTitle: document.querySelector("#dateTitle"),
+  embeddingReadyCount: document.querySelector("#embeddingReadyCount"),
   emptyState: document.querySelector("#emptyState"),
+  findSimilarButton: document.querySelector("#findSimilarButton"),
   frameCount: document.querySelector("#frameCount"),
   inspectorClose: document.querySelector("#inspectorClose"),
   inspectorContent: document.querySelector("#inspectorContent"),
@@ -30,6 +32,8 @@ const elements = {
   previewDimensions: document.querySelector("#previewDimensions"),
   queuedJobCount: document.querySelector("#queuedJobCount"),
   readyJobCount: document.querySelector("#readyJobCount"),
+  relationEvidence: document.querySelector("#relationEvidence"),
+  resultModeLabel: document.querySelector("#resultModeLabel"),
 };
 
 const state = {
@@ -38,8 +42,11 @@ const state = {
   currentDate: null,
   dates: [],
   hasMore: false,
+  embeddingCount: 0,
   loading: false,
+  mode: "date",
   query: "",
+  relationBasis: null,
   requestSerial: 0,
   selectedIndex: -1,
   total: 0,
@@ -55,10 +62,11 @@ async function requestJSON(url, signal = undefined) {
     headers: { Accept: "application/json" },
     signal,
   });
+  const payload = await response.json();
   if (!response.ok) {
-    throw new Error(`Local index request failed with ${response.status}`);
+    throw new Error(payload.message || `Local index request failed with ${response.status}`);
   }
-  return response.json();
+  return payload;
 }
 
 async function boot() {
@@ -68,14 +76,21 @@ async function boot() {
     elements.cachedAssetCount.textContent = String(library.cached_assets);
     elements.readyJobCount.textContent = String(library.preview_jobs.succeeded);
     elements.queuedJobCount.textContent = String(library.preview_jobs.pending);
+    state.embeddingCount = library.embedding_index?.indexed_assets || 0;
+    elements.embeddingReadyCount.textContent = String(state.embeddingCount);
     renderDates();
     setupPaginationObserver();
-    const requested = new URLSearchParams(window.location.search).get("date");
+    const parameters = new URLSearchParams(window.location.search);
+    const requested = parameters.get("date");
+    const requestedQuery = (parameters.get("q") || "").trim();
     const initialDate = state.dates.some((item) => item.capture_date === requested)
       ? requested
       : state.dates[0]?.capture_date;
     if (initialDate) {
-      await loadDate(initialDate);
+      state.currentDate = initialDate;
+      elements.librarySearch.value = requestedQuery;
+      updateDateChrome();
+      await resetResults(requestedQuery);
     } else {
       showEmpty("NO CACHED FRAMES", "Run the preview worker to populate the local index.");
     }
@@ -112,7 +127,7 @@ function renderDates() {
 }
 
 async function loadDate(captureDate) {
-  if (!captureDate || captureDate === state.currentDate) {
+  if (!captureDate || (captureDate === state.currentDate && state.mode === "date")) {
     return;
   }
   state.currentDate = captureDate;
@@ -120,6 +135,7 @@ async function loadDate(captureDate) {
   updateDateChrome();
   const url = new URL(window.location.href);
   url.searchParams.set("date", captureDate);
+  url.searchParams.delete("q");
   window.history.replaceState({}, "", url);
   await resetResults("");
 }
@@ -130,6 +146,7 @@ function updateDateChrome() {
   elements.dateTitle.textContent = date
     ? new Intl.DateTimeFormat("en", { day: "2-digit", month: "long", year: "numeric" }).format(date)
     : "Contact Sheet";
+  elements.resultModeLabel.textContent = "Embedded RAW previews";
   for (const button of elements.dateList.querySelectorAll(".date-button")) {
     if (button.dataset.date === state.currentDate) {
       button.setAttribute("aria-current", "date");
@@ -147,6 +164,9 @@ function appendCards(startIndex) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "photo-card";
+    if (state.mode !== "date") {
+      card.classList.add("ranked-card");
+    }
     card.dataset.index = String(index);
     card.setAttribute("aria-label", `Inspect ${asset.name}`);
     card.setAttribute("aria-selected", "false");
@@ -162,7 +182,7 @@ function appendCards(startIndex) {
     image.addEventListener("load", () => image.classList.add("loaded"));
     const frameIndex = document.createElement("span");
     frameIndex.className = "frame-index";
-    frameIndex.textContent = String(index + 1).padStart(2, "0");
+    frameIndex.textContent = String(asset.rank || index + 1).padStart(2, "0");
     imageWell.append(image, frameIndex);
 
     const caption = document.createElement("span");
@@ -172,7 +192,10 @@ function appendCards(startIndex) {
     name.textContent = asset.name.replace(/\.ARW$/i, "");
     const time = document.createElement("span");
     time.className = "card-time";
-    time.textContent = captureTime(asset.capture_at);
+    time.textContent =
+      state.mode === "date"
+        ? captureTime(asset.capture_at)
+        : `${captureDate(asset.capture_at)} · ${formatSimilarity(asset.similarity)}`;
     caption.append(name, time);
     card.append(imageWell, caption);
     fragment.append(card);
@@ -196,13 +219,43 @@ function setupPaginationObserver() {
 }
 
 async function resetResults(query) {
+  const mode = query ? "semantic" : "date";
+  prepareResults(mode, query);
+  const url = new URL(window.location.href);
+  if (query) {
+    url.searchParams.set("q", query);
+    updateSemanticChrome(query);
+  } else {
+    url.searchParams.delete("q");
+    updateDateChrome();
+  }
+  window.history.replaceState({}, "", url);
+  try {
+    if (mode === "semantic") {
+      await loadSemanticResults();
+    } else {
+      await loadNextPage();
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      showEmpty(
+        mode === "semantic" ? "SEMANTIC SEARCH UNAVAILABLE" : "LOCAL INDEX UNAVAILABLE",
+        error.message,
+      );
+    }
+  }
+}
+
+function prepareResults(mode, query) {
   state.controller?.abort();
   state.controller = new AbortController();
   state.requestSerial += 1;
   state.assets = [];
-  state.hasMore = true;
+  state.hasMore = mode === "date";
   state.loading = false;
+  state.mode = mode;
   state.query = query;
+  state.relationBasis = null;
   state.selectedIndex = -1;
   state.total = 0;
   elements.contactGrid.replaceChildren();
@@ -213,17 +266,41 @@ async function resetResults(query) {
   closeInspector(false);
   clearInspector();
   updateResultCounts();
+}
+
+function updateSemanticChrome(query) {
+  elements.dateBreadcrumb.textContent = "SEMANTIC / ALL DATES";
+  elements.dateTitle.textContent = `“${query}”`;
+  elements.resultModeLabel.textContent = "SigLIP2 cosine search";
+}
+
+async function loadSemanticResults() {
+  const serial = state.requestSerial;
+  state.loading = true;
   try {
-    await loadNextPage();
-  } catch (error) {
-    if (error.name !== "AbortError") {
-      showEmpty("LOCAL INDEX UNAVAILABLE", error.message);
+    const parameters = new URLSearchParams({ q: state.query, limit: "100" });
+    const payload = await requestJSON(
+      `/api/search?${parameters.toString()}`,
+      state.controller?.signal,
+    );
+    if (serial !== state.requestSerial) {
+      return;
     }
+    state.assets = payload.results;
+    state.total = payload.total;
+    state.hasMore = false;
+    state.relationBasis = payload.basis;
+    appendCards(0);
+    if (state.assets.length > 0) {
+      selectAsset(0, false);
+    }
+  } finally {
+    finishResultLoad(serial, "NO SEMANTIC MATCHES", "Try a different visual idea or scene.");
   }
 }
 
 async function loadNextPage() {
-  if (state.loading || !state.hasMore || !state.currentDate) {
+  if (state.mode !== "date" || state.loading || !state.hasMore || !state.currentDate) {
     return;
   }
   const serial = state.requestSerial;
@@ -233,9 +310,6 @@ async function loadNextPage() {
     limit: String(PAGE_SIZE),
     offset: String(offset),
   });
-  if (state.query) {
-    parameters.set("q", state.query);
-  }
   state.loading = true;
   updatePaginationStatus();
   try {
@@ -255,26 +329,30 @@ async function loadNextPage() {
       selectAsset(0, false);
     }
   } finally {
-    if (serial === state.requestSerial) {
-      state.loading = false;
-      elements.loadingState.hidden = true;
-      updateResultCounts();
-      updatePaginationStatus();
-      if (state.assets.length === 0) {
-        showEmpty(
-          state.query ? "NO MATCHING FRAMES" : "NO CACHED FRAMES",
-          state.query
-            ? "Try another filename, camera, or lens."
-            : "Run the preview worker to populate the local index.",
-        );
-      }
-    }
+    finishResultLoad(
+      serial,
+      "NO CACHED FRAMES",
+      "Run the preview worker to populate the local index.",
+    );
+  }
+}
+
+function finishResultLoad(serial, emptyCode, emptyMessage) {
+  if (serial !== state.requestSerial) {
+    return;
+  }
+  state.loading = false;
+  elements.loadingState.hidden = true;
+  updateResultCounts();
+  updatePaginationStatus();
+  if (state.assets.length === 0) {
+    showEmpty(emptyCode, emptyMessage);
   }
 }
 
 function updateResultCounts() {
-  const singular = state.query ? "match" : "frame";
-  const plural = state.query ? "matches" : "frames";
+  const singular = state.mode === "date" ? "frame" : "match";
+  const plural = state.mode === "date" ? "frames" : "matches";
   if (state.assets.length < state.total) {
     elements.frameCount.textContent = `${state.assets.length} of ${state.total} ${plural}`;
   } else {
@@ -313,6 +391,18 @@ function selectAsset(index, openOverlay) {
   elements.metaSize.textContent = formatBytes(asset.size_bytes);
   elements.archivePath.textContent = asset.remote_path;
   elements.copyPathButton.textContent = "Copy archive path";
+  elements.findSimilarButton.disabled = state.embeddingCount === 0;
+  if (typeof asset.similarity === "number") {
+    const interpretation =
+      state.relationBasis?.interpretation ||
+      "Similarity is model evidence, not proof of place, identity, or story.";
+    elements.relationEvidence.textContent =
+      `Cosine ${asset.similarity.toFixed(3)}. ${interpretation}`;
+    elements.relationEvidence.hidden = false;
+  } else {
+    elements.relationEvidence.hidden = true;
+    elements.relationEvidence.textContent = "";
+  }
   if (openOverlay && window.matchMedia("(max-width: 1040px)").matches) {
     elements.appShell.classList.add("inspector-open");
   }
@@ -324,6 +414,9 @@ function clearInspector() {
   elements.inspectorEmpty.hidden = false;
   elements.inspectorTitle.textContent = "No selection";
   elements.inspectorImage.removeAttribute("src");
+  elements.findSimilarButton.disabled = state.embeddingCount === 0;
+  elements.relationEvidence.hidden = true;
+  elements.relationEvidence.textContent = "";
 }
 
 function closeInspector(restoreFocus = true) {
@@ -342,6 +435,51 @@ function scheduleSearch() {
       void resetResults(query);
     }
   }, SEARCH_DELAY_MS);
+}
+
+async function findSimilar() {
+  const source = state.assets[state.selectedIndex];
+  if (!source || state.embeddingCount === 0) {
+    return;
+  }
+  prepareResults("similar", "");
+  elements.librarySearch.value = "";
+  elements.dateBreadcrumb.textContent = `SIMILAR / ${source.name.replace(/\.ARW$/i, "")}`;
+  elements.dateTitle.textContent = "Visual Neighbors";
+  elements.resultModeLabel.textContent = "SigLIP2 image cosine";
+  const url = new URL(window.location.href);
+  url.searchParams.delete("q");
+  window.history.replaceState({}, "", url);
+  const serial = state.requestSerial;
+  state.loading = true;
+  let failure = null;
+  try {
+    const payload = await requestJSON(
+      `/api/assets/${source.id}/similar?limit=100`,
+      state.controller?.signal,
+    );
+    if (serial !== state.requestSerial) {
+      return;
+    }
+    state.assets = payload.results;
+    state.total = payload.total;
+    state.relationBasis = payload.basis;
+    appendCards(0);
+    if (state.assets.length > 0) {
+      selectAsset(0, false);
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    finishResultLoad(
+      serial,
+      "NO VISUAL NEIGHBORS",
+      "This frame does not have another indexed visual neighbor yet.",
+    );
+  }
+  if (failure && failure.name !== "AbortError") {
+    showEmpty("SIMILARITY UNAVAILABLE", failure.message);
+  }
 }
 
 function moveSelection(delta) {
@@ -385,6 +523,15 @@ function showEmpty(code, message) {
 function captureTime(value) {
   const match = /\s(\d{2}:\d{2})/.exec(value || "");
   return match ? match[1] : "--:--";
+}
+
+function captureDate(value) {
+  const match = /^(\d{4}):(\d{2}):(\d{2})/.exec(value || "");
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : "UNKNOWN DATE";
+}
+
+function formatSimilarity(value) {
+  return typeof value === "number" ? value.toFixed(3) : "--";
 }
 
 function formatCaptureDate(value) {
@@ -446,6 +593,7 @@ elements.loadMoreButton.addEventListener("click", () => void loadNextPage());
 elements.mobileDateSelect.addEventListener("change", (event) => loadDate(event.target.value));
 elements.inspectorClose.addEventListener("click", () => closeInspector());
 elements.copyPathButton.addEventListener("click", copyArchivePath);
+elements.findSimilarButton.addEventListener("click", () => void findSimilar());
 
 document.addEventListener("keydown", (event) => {
   const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;

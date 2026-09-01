@@ -11,7 +11,7 @@ worker 可以分批处理 pending job，中断后的 running job 会在超时后
 同一指纹已经成功完成时保持 succeeded，内容变化或用户显式要求重试时才重新排队。
 
 本地 contact sheet 现在只读取 SQLite 与派生缓存，不创建 CloudDrive 客户端。
-界面包含日期导航、缩略图网格、文件名/相机/镜头筛选、键盘选择和 EXIF inspector。
+界面包含日期导航、缩略图网格、跨日期语义搜索、相似照片、键盘选择和 EXIF inspector。
 Contact 缓存决定照片是否可见，中尺寸 preview 被 LRU 淘汰时 inspector 会回退到 contact，因此缓存压力不会让照片从日期列表消失。
 
 首轮真实全库 worker 已经完成 25,793 个 preview job。
@@ -139,6 +139,32 @@ CloudDrive 已读取区段的本地缓存与 Latent 派生预览缓存是两个�
 - `1440x900` 为五列布局，无页面或网格横向溢出
 - `390x844` 为两列布局，日期选择、搜索和 Inspector 开关均正常
 
+## Semantic discovery evidence
+
+全局搜索不再依赖 `DSCxxxxx` 文件名。
+服务使用独立的 SigLIP2 vector store，把自然语言 query 与全部已完成的本地 contact embedding 做 cosine ranking。
+相似照片直接使用已保存的图像向量，并从结果中排除源图。
+
+HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 embedding store。
+它没有修改正式的 25,793 项 production queue。
+
+实测结果为：
+
+- 中文查询 `天空中飞翔的鸟` 冷启动 HTTP 总耗时 6.638 秒，返回 3 条完整资产记录
+- 模型保持在同一服务进程后，中文查询 `夜晚城市灯光` 总耗时 0.474 秒
+- 从真实资产请求相似照片耗时 4.7 毫秒，源图被排除
+- 搜索响应包含 rank、cosine similarity、模型 ID、local contact source 和解释边界
+- `1440x900` 桌面界面完成语义搜索和相似照片真实手势验证，无横向溢出
+- `390x844` 手机界面完成语义搜索、两列结果和 Inspector 覆盖层真实手势验证，无横向溢出
+- 两种视口的浏览器控制台均没有 warning 或 error
+
+3 张样本只能证明 text encoder、vector ranking、Library metadata 和 HTTP/UI 的端到端连接。
+它不能证明全库检索质量，也不能支持有意义的 Curator 判断。
+正式 store 仍为 25,793 pending、0 succeeded、0 failed 和 0 vectors，必须在用户确认资源预算后才会启动全库构建。
+
+所有返回关系都明确标注为模型证据，不是地点、人物身份或故事的证明。
+服务只读取本地 SQLite、contact cache、embedding store 和本地模型目录，不读取 RAW、不访问 CloudDrive，也不写入 aDrive。
+
 ## Queue contract
 
 - Claim 使用 SQLite `BEGIN IMMEDIATE`，避免两个 worker 同时取得同一个 job。
@@ -155,5 +181,5 @@ CloudDrive 已读取区段的本地缓存与 Latent 派生预览缓存是两个�
 
 ## Next step
 
-下一步是增加跨日期全局搜索，并实现 Sequence 与可独立备份的 writable workspace。
+下一步是在资源预算确认后构建全库 embedding，并实现受证据约束的 Curator、Sequence 与可独立备份的 writable workspace。
 DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。

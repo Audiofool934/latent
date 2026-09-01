@@ -960,6 +960,32 @@ class StateStore:
         ).fetchone()
         return int(row[0])
 
+    def library_assets_by_ids(self, asset_ids: list[int]) -> list[dict[str, Any]]:
+        if not asset_ids:
+            return []
+        if len(asset_ids) > 500:
+            raise ValueError("asset lookup is limited to 500 IDs")
+        unique_ids = list(dict.fromkeys(asset_ids))
+        placeholders = ",".join("?" for _asset_id in unique_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT
+                a.id, a.name, a.remote_path, a.size_bytes, a.capture_at,
+                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                contact.relative_path AS contact_path,
+                preview.relative_path AS preview_path
+            FROM assets AS a
+            JOIN cache_entries AS contact
+              ON contact.asset_id = a.id AND contact.variant = 'contact'
+            LEFT JOIN cache_entries AS preview
+              ON preview.asset_id = a.id AND preview.variant = 'preview'
+            WHERE a.id IN ({placeholders})
+            """,
+            unique_ids,
+        ).fetchall()
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        return [by_id[asset_id] for asset_id in asset_ids if asset_id in by_id]
+
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         run_count = self.connection.execute("SELECT COUNT(*) FROM fetch_runs").fetchone()[0]

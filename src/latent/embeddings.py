@@ -534,6 +534,27 @@ class EmbeddingStore:
             )
         ]
 
+    def vector_revision(self) -> tuple[int, str, str, int, int]:
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count,
+                   COALESCE(MAX(e.updated_at), '') AS vector_updated_at,
+                   COALESCE(MAX(j.updated_at), '') AS job_updated_at,
+                   COALESCE(SUM(length(e.vector)), 0) AS bytes,
+                   COALESCE(SUM(j.asset_id), 0) AS asset_id_sum
+            FROM embeddings AS e
+            JOIN embedding_jobs AS j ON j.id = e.job_id
+            WHERE j.status='succeeded' AND e.fingerprint = j.fingerprint
+            """
+        ).fetchone()
+        return (
+            int(row["count"]),
+            str(row["vector_updated_at"]),
+            str(row["job_updated_at"]),
+            int(row["bytes"]),
+            int(row["asset_id_sum"]),
+        )
+
     def status(self) -> dict[str, object]:
         row = self.connection.execute(
             "SELECT COUNT(*) AS count, COALESCE(SUM(length(vector)), 0) AS bytes FROM embeddings"

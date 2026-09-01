@@ -9,8 +9,10 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
 本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
 首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
-高容量日期按 250 张一批增量加载，当前日期内的文件名、相机和镜头搜索由本地索引完成，不受单页上限影响。
-本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索推荐模型，全库索引仍等待资源预算确认。
+高容量日期按 250 张一批增量加载，不受单页上限影响。
+本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索模型。
+跨日期语义搜索、相似照片 API 和对应界面已经在 3 张真实 contact preview 的隔离向量库上跑通。
+正式图库仍保持 25,793 个 pending、0 个 vector，全库索引等待资源预算确认。
 
 ## Phase 0 spike
 
@@ -37,6 +39,9 @@ uv run latent embedding-sync
 uv run latent serve
 uv run pytest
 ```
+
+语义查询需要先用 `uv sync --group embedding-bench` 安装本地 SigLIP2 runtime。
+服务只从已经下载的模型目录加载，不会在查询时联网下载模型。
 
 默认状态保存在 `~/Library/Application Support/Latent/phase0/`。
 CloudDrive device token 只从应用自己的本地 plist 读取到内存，不会写入项目、SQLite、缓存文件或命令输出。
@@ -190,16 +195,17 @@ MVP 包含：
 验证 CloudDrive API、范围读取、ARW 内嵌预览提取、SQLite 索引和缓存淘汰策略。
 核心纵向链路已在三张真实 ARW 上跑通，包括 A7R II、A7R V、横幅和竖幅样本。
 
-### Phase 1: Library MVP
+### Phase 1: Library and discovery MVP
 
-完成真实档案索引、contact sheet、inspector、搜索、Sequence 和 DxO handoff。
+完成真实档案索引、contact sheet、inspector、SigLIP2 embedding、跨日期语义搜索、相似照片、受约束 Curator、Sequence 和 DxO handoff。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
 日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
+embedding queue、语义搜索和相似照片链路已经完成有界验证，全库向量构建、Curator 和 Sequence 仍在本轮目标内。
 
-### Phase 2: Curator
+### Phase 2: Curator expansion
 
-加入视觉 embedding、相似照片、跨年份母题、关系解释和 Sequence 建议。
+在第一版有依据的关系解释之上，加入主题聚类、跨年份母题、可比较的策展方向和更完整的 Sequence 建议。
 
 ### Phase 3: Derivatives
 
@@ -210,6 +216,7 @@ MVP 包含：
 - 原生 SwiftUI、Tauri 或其他 macOS 桌面技术栈
 - CloudDrive API 的稳定接入与凭证边界
 - 8 GB 默认缓存是否需要按磁盘空间动态调整
-- embedding 模型与本地推理性能
+- 全库 embedding 的调度与可接受资源窗口
+- Curator 输出的保存、重算与版本边界
 - Writable workspace 的备份与交换格式
 - Sequence 第一版的交互粒度与导出目标

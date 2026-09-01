@@ -14,9 +14,24 @@ from urllib.request import urlopen
 import pytest
 from PIL import Image
 
+from latent.embeddings import (
+    DEFAULT_EMBEDDING_MODEL,
+    EmbeddingAsset,
+    EmbeddingStore,
+    serialize_float16_vector,
+)
 from latent.models import PreviewLocation, ProbeResult, RemoteAsset
+from latent.search import SemanticSearch, VectorIndex
 from latent.storage import CacheManager, StateStore
 from latent.web_server import LibraryServer, _is_loopback
+
+
+class FakeTextEncoder:
+    model_id = DEFAULT_EMBEDDING_MODEL
+
+    def encode_texts(self, texts: list[str]) -> list[list[float]]:
+        assert texts
+        return [[1.0, 0.0, 0.0, 0.0] for _text in texts]
 
 
 def _jpeg_bytes(size: tuple[int, int]) -> bytes:
@@ -80,7 +95,11 @@ def _seed_library(
     return asset, contact, preview
 
 
-def _seed_pageable_library(state_dir: Path) -> None:
+def _seed_pageable_library(
+    state_dir: Path,
+    *,
+    capture_dates: tuple[str, str, str] = ("2025-12-25",) * 3,
+) -> None:
     contact = _jpeg_bytes((480, 320))
     rows = (
         ("DSC00001.ARW", "ILCE-7RM5", "FE 24mm F1.4 GM"),
@@ -92,14 +111,18 @@ def _seed_pageable_library(state_dir: Path) -> None:
             store,
             {"contact": 10**7, "preview": 10**7, "temporary": 0},
         )
-        for index, (name, camera, lens) in enumerate(rows, start=1):
+        for index, ((name, camera, lens), capture_date) in enumerate(
+            zip(rows, capture_dates, strict=True),
+            start=1,
+        ):
+            exif_date = capture_date.replace("-", ":")
             asset = RemoteAsset(
                 provider="test",
                 remote_id=f"asset-{index}",
-                remote_path=f"/archive/2025/2025-12-25/{name}",
+                remote_path=f"/archive/{capture_date[:4]}/{capture_date}/{name}",
                 name=name,
                 size_bytes=70_000_000 + index,
-                write_time=f"2025-12-25T14:30:{index:02d}+08:00",
+                write_time=f"{capture_date}T14:30:{index:02d}+08:00",
                 file_hashes={"2": f"hash-{index}"},
             )
             asset_id = store.upsert_asset(asset)
@@ -108,7 +131,7 @@ def _seed_pageable_library(state_dir: Path) -> None:
                 ProbeResult(
                     location=PreviewLocation("PreviewImage", 512, len(contact)),
                     metadata={
-                        "DateTimeOriginal": f"2025:12:25 14:30:{index:02d}",
+                        "DateTimeOriginal": f"{exif_date} 14:30:{index:02d}",
                         "Model": camera,
                         "LensModel": lens,
                     },
@@ -127,8 +150,18 @@ def _seed_pageable_library(state_dir: Path) -> None:
 
 
 @contextmanager
-def _running_server(state_dir: Path) -> Iterator[str]:
-    server: HTTPServer = LibraryServer(("127.0.0.1", 0), state_dir)
+def _running_server(
+    state_dir: Path,
+    *,
+    vector_index: VectorIndex | None = None,
+    semantic_search: SemanticSearch | None = None,
+) -> Iterator[str]:
+    server: HTTPServer = LibraryServer(
+        ("127.0.0.1", 0),
+        state_dir,
+        vector_index=vector_index,
+        semantic_search=semantic_search,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -240,6 +273,96 @@ def test_contact_only_asset_remains_visible_after_preview_eviction(tmp_path: Pat
         assert indexed_asset["preview_url"] == indexed_asset["contact_url"]
         with urlopen(f"{base_url}{indexed_asset['preview_url']}", timeout=2) as response:
             assert response.read() == contact
+
+
+def test_semantic_and_visual_similarity_apis_return_ranked_local_assets(
+    tmp_path: Path,
+) -> None:
+    _seed_pageable_library(
+        tmp_path,
+        capture_dates=("2025-12-25", "2025-12-25", "2026-08-29"),
+    )
+    embedding_dir = tmp_path / "embeddings"
+    embedding_assets = [
+        EmbeddingAsset(
+            asset_id=asset_id,
+            provider="test",
+            remote_path=f"/archive/2025/2025-12-25/DSC{asset_id:05d}.ARW",
+            fingerprint=f"fingerprint-{asset_id}",
+            capture_at=(
+                f"2026:08:29 14:30:{asset_id:02d}"
+                if asset_id == 3
+                else f"2025:12:25 14:30:{asset_id:02d}"
+            ),
+            contact_relative_path=f"contact/{asset_id}.jpg",
+        )
+        for asset_id in (1, 2, 3)
+    ]
+    vectors = {
+        1: [1.0, 0.0, 0.0, 0.0],
+        2: [0.0, 1.0, 0.0, 0.0],
+        3: [0.8, 0.2, 0.0, 0.0],
+    }
+    with EmbeddingStore(embedding_dir, dimensions=4) as store:
+        store.sync_assets(embedding_assets)
+        jobs = store.claim_jobs(3)
+        store.finish_jobs(
+            [(job, serialize_float16_vector(vectors[job.asset_id], 4)) for job in jobs]
+        )
+    vector_index = VectorIndex(embedding_dir, dimensions=4)
+    semantic_search = SemanticSearch(vector_index, FakeTextEncoder())
+
+    with _running_server(
+        tmp_path,
+        vector_index=vector_index,
+        semantic_search=semantic_search,
+    ) as base_url:
+        library, _ = _get_json(f"{base_url}/api/library")
+        assert library["embedding_index"] == {
+            "indexed_assets": 3,
+            "semantic_ready": True,
+        }
+
+        semantic, _ = _get_json(f"{base_url}/api/search?q=blue%20snow&limit=2")
+        assert semantic["mode"] == "semantic"
+        assert semantic["query"] == "blue snow"
+        assert [asset["id"] for asset in semantic["results"]] == [1, 3]
+        assert [asset["capture_at"][:10] for asset in semantic["results"]] == [
+            "2025:12:25",
+            "2026:08:29",
+        ]
+        assert semantic["results"][0]["rank"] == 1
+        assert semantic["results"][0]["similarity"] == pytest.approx(1.0)
+        assert semantic["basis"]["metric"] == "cosine_similarity"
+        assert "not proof" in semantic["basis"]["interpretation"]
+        assert semantic["cloud_access"] is False
+
+        similar, _ = _get_json(f"{base_url}/api/assets/1/similar?limit=2")
+        assert similar["mode"] == "visual_similarity"
+        assert similar["source_asset_id"] == 1
+        assert [asset["id"] for asset in similar["results"]] == [3, 2]
+        assert all(asset["id"] != 1 for asset in similar["results"])
+
+        with pytest.raises(HTTPError) as missing_embedding:
+            urlopen(f"{base_url}/api/assets/999/similar", timeout=2)
+        assert missing_embedding.value.code == 404
+
+
+def test_semantic_apis_fail_closed_until_vectors_exist(tmp_path: Path) -> None:
+    _seed_library(tmp_path)
+
+    with _running_server(tmp_path) as base_url:
+        with pytest.raises(HTTPError) as empty_query:
+            urlopen(f"{base_url}/api/search?q=", timeout=2)
+        assert empty_query.value.code == 400
+
+        with pytest.raises(HTTPError) as unavailable_search:
+            urlopen(f"{base_url}/api/search?q=moon", timeout=2)
+        assert unavailable_search.value.code == 503
+
+        with pytest.raises(HTTPError) as unavailable_similar:
+            urlopen(f"{base_url}/api/assets/1/similar", timeout=2)
+        assert unavailable_similar.value.code == 503
 
 
 def test_loopback_detection_is_explicit() -> None:

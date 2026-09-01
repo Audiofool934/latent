@@ -420,6 +420,15 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
+.ranked-card .card-caption {
+  display: grid;
+  gap: 4px;
+}
+
+.ranked-card .card-time {
+  font-size: 7px;
+}
+
 .loading-state,
 .empty-state {
   position: absolute;
@@ -655,6 +664,28 @@ kbd {
   color: var(--text);
 }
 
+.text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.discover-button {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.relation-evidence {
+  margin: 12px 0 0;
+  color: var(--faint);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.relation-evidence[hidden] {
+  display: none;
+}
+
 @media (max-width: 1180px) {
   :root {
     --sidebar-width: 190px;
@@ -720,17 +751,21 @@ kbd {
   }
 
   .toolbar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     width: 100%;
   }
 
   .mobile-date-label {
     display: block;
+    align-self: center;
     color: var(--faint);
     font-size: 9px;
   }
 
   .mobile-date-select {
     display: block;
+    width: 100%;
     min-height: 35px;
     padding: 0 8px;
     border: 1px solid var(--line);
@@ -741,7 +776,9 @@ kbd {
   }
 
   .search-field {
-    flex: 1;
+    grid-column: 1 / -1;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    width: 100%;
   }
 
   .workspace-footer {

@@ -6,6 +6,7 @@ import ipaddress
 import json
 import mimetypes
 import re
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -14,21 +15,62 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .errors import ConfigurationError
+from .search import (
+    DEFAULT_SIGLIP2_MODEL_CACHE,
+    LazySigLIP2TextEncoder,
+    SemanticSearch,
+    VectorIndex,
+)
 from .storage import StateStore
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_SEARCH_LENGTH = 200
 _STATIC_FILES = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js"}
+_SIMILAR_PATH = re.compile(r"^/api/assets/(\d+)/similar$")
 
 
 class LibraryServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], state_dir: Path) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state_dir: Path,
+        *,
+        vector_index: VectorIndex | None = None,
+        semantic_search: SemanticSearch | None = None,
+        embedding_dir: Path | None = None,
+        model_cache: Path = DEFAULT_SIGLIP2_MODEL_CACHE,
+        semantic_device: str = "auto",
+    ) -> None:
         self.state_dir = state_dir.expanduser().resolve()
         self.cache_root = (self.state_dir / "cache").resolve()
+        resolved_embedding_dir = (
+            embedding_dir.expanduser().resolve()
+            if embedding_dir is not None
+            else self.state_dir / "embeddings/siglip2-base"
+        )
+        self.vector_index = vector_index or VectorIndex(resolved_embedding_dir)
+        self._semantic_search = semantic_search
+        self._semantic_lock = threading.Lock()
+        self.model_cache = model_cache.expanduser().resolve()
+        self.semantic_device = semantic_device
         super().__init__(address, LibraryRequestHandler)
+
+    def get_semantic_search(self) -> SemanticSearch:
+        if self._semantic_search is not None:
+            return self._semantic_search
+        with self._semantic_lock:
+            if self._semantic_search is None:
+                self._semantic_search = SemanticSearch(
+                    self.vector_index,
+                    LazySigLIP2TextEncoder(
+                        self.model_cache,
+                        device=self.semantic_device,
+                    ),
+                )
+        return self._semantic_search
 
 
 class LibraryRequestHandler(BaseHTTPRequestHandler):
@@ -45,10 +87,24 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 self._serve_library()
             elif parsed.path == "/api/assets":
                 self._serve_assets(parse_qs(parsed.query))
+            elif parsed.path == "/api/search":
+                self._serve_semantic_search(parse_qs(parsed.query))
+            elif match := _SIMILAR_PATH.fullmatch(parsed.path):
+                self._serve_similar(int(match.group(1)), parse_qs(parsed.query))
             elif parsed.path.startswith("/media/"):
                 self._serve_media(parsed.path.removeprefix("/media/"))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except ConfigurationError as error:
+            self._send_json(
+                {"error": type(error).__name__, "message": str(error)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        except KeyError as error:
+            self._send_json(
+                {"error": type(error).__name__, "message": str(error)},
+                status=HTTPStatus.NOT_FOUND,
+            )
         except (OSError, ValueError) as error:
             self._send_json(
                 {"error": type(error).__name__, "message": str(error)},
@@ -68,11 +124,19 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         with StateStore(self.server.state_dir) as store:
             dates = store.library_dates()
             jobs = store.preview_job_counts()
+        try:
+            indexed_assets = self.server.vector_index.size
+        except ConfigurationError:
+            indexed_assets = 0
         self._send_json(
             {
                 "dates": dates,
                 "cached_assets": sum(int(item["asset_count"]) for item in dates),
                 "preview_jobs": jobs,
+                "embedding_index": {
+                    "indexed_assets": indexed_assets,
+                    "semantic_ready": indexed_assets > 0,
+                },
                 "cloud_access": False,
             }
         )
@@ -110,6 +174,75 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 "has_more": has_more,
                 "next_offset": next_offset if has_more else None,
                 "assets": payload,
+                "cloud_access": False,
+            }
+        )
+
+    def _serve_semantic_search(self, query: dict[str, list[str]]) -> None:
+        search_query = (_single(query, "q") or "").strip()
+        if not search_query:
+            raise ValueError("semantic query cannot be empty")
+        if len(search_query) > _MAX_SEARCH_LENGTH:
+            raise ValueError(f"semantic query must be {_MAX_SEARCH_LENGTH} characters or fewer")
+        limit = _bounded_int(_single(query, "limit"), default=50, minimum=1, maximum=100)
+        if self.server.vector_index.size == 0:
+            raise ConfigurationError("semantic index has no completed vectors")
+        matches = self.server.get_semantic_search().search(search_query, limit=limit)
+        self._send_matches(
+            matches,
+            {
+                "query": search_query,
+                "mode": "semantic",
+            },
+        )
+
+    def _serve_similar(
+        self,
+        asset_id: int,
+        query: dict[str, list[str]],
+    ) -> None:
+        limit = _bounded_int(_single(query, "limit"), default=50, minimum=1, maximum=100)
+        if self.server.vector_index.size == 0:
+            raise ConfigurationError("similarity index has no completed vectors")
+        matches = self.server.vector_index.similar(asset_id, limit=limit)
+        self._send_matches(
+            matches,
+            {
+                "source_asset_id": asset_id,
+                "mode": "visual_similarity",
+            },
+        )
+
+    def _send_matches(self, matches: list[Any], context: dict[str, Any]) -> None:
+        asset_ids = [int(match.asset_id) for match in matches]
+        with StateStore(self.server.state_dir) as store:
+            assets = store.library_assets_by_ids(asset_ids)
+        by_id = {int(asset["id"]): asset for asset in assets}
+        results = []
+        for match in matches:
+            asset = by_id.get(int(match.asset_id))
+            if asset is None:
+                continue
+            results.append(
+                {
+                    **self._asset_payload(asset),
+                    "rank": int(match.rank),
+                    "similarity": float(match.score),
+                }
+            )
+        self._send_json(
+            {
+                **context,
+                "total": len(results),
+                "results": results,
+                "basis": {
+                    "model_id": self.server.vector_index.model_id,
+                    "metric": "cosine_similarity",
+                    "source": "local_contact_embeddings",
+                    "interpretation": (
+                        "Similarity is model evidence, not proof of place, identity, or story."
+                    ),
+                },
                 "cloud_access": False,
             }
         )
@@ -176,10 +309,19 @@ def serve_library(
     host: str = "127.0.0.1",
     port: int = 8765,
     allow_remote: bool = False,
+    embedding_dir: Path | None = None,
+    model_cache: Path = DEFAULT_SIGLIP2_MODEL_CACHE,
+    semantic_device: str = "auto",
 ) -> None:
     if not allow_remote and not _is_loopback(host):
         raise ConfigurationError("refusing a non-loopback bind without --allow-remote")
-    server = LibraryServer((host, port), state_dir)
+    server = LibraryServer(
+        (host, port),
+        state_dir,
+        embedding_dir=embedding_dir,
+        model_cache=model_cache,
+        semantic_device=semantic_device,
+    )
     actual_host, actual_port = server.server_address[:2]
     print(f"Latent contact sheet: http://{actual_host}:{actual_port}", flush=True)
     print("CloudDrive access: disabled in this server", flush=True)
