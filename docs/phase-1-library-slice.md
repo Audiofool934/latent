@@ -14,6 +14,9 @@ worker 可以分批处理 pending job，中断后的 running job 会在超时后
 界面包含日期导航、缩略图网格、文件名/相机/镜头筛选、键盘选择和 EXIF inspector。
 Contact 缓存决定照片是否可见，中尺寸 preview 被 LRU 淘汰时 inspector 会回退到 contact，因此缓存压力不会让照片从日期列表消失。
 
+首轮真实全库 worker 已经完成 25,793 个 preview job。
+最初遗留的 3 个 CloudDrive HTTP 500 项在客户端升级后进行了一次有界重试，并全部成功。
+
 ## Commands
 
 ```bash
@@ -100,6 +103,26 @@ HTTP 边界测试确认静态资源、JSON API 与缓存 JPEG 都能从 wheel �
 服务默认拒绝非 loopback 地址，媒体路由拒绝路径穿越，并为响应设置 CSP 与基础安全头。
 额外测试确认中尺寸 preview 被淘汰后，contact-only 照片仍保留在日期和 contact sheet 中。
 
+## Full archive preview evidence
+
+首轮真实全库运行的最终状态为：
+
+- 25,793 个 preview job succeeded
+- 0 个 pending、running 或 failed job
+- 25,793 个 contact cache entry，占用 608,759,497 bytes
+- 17,724 个中尺寸 preview cache entry，占用 4,294,870,531 bytes
+- 全部 fetch run 累计传输 15,566,916,758 bytes，约 14.50 GiB
+- 0 次 archive write
+
+中尺寸 preview 缓存已经稳定在 4 GiB LRU 上限附近，因此其 entry 数量少于全库总数是预期行为。
+Contact cache 保留全库覆盖，确保被 LRU 淘汰的照片仍可在日期浏览器中出现。
+
+CloudDrive 1.0.16 的 macOS 按需流式读取能力不会替代这条索引管线。
+批量预览继续使用严格 Range 读取，以获得明确的字节上限和完整响应拒绝机制。
+macFUSE 挂载路径只作为未来 DxO 原片 handoff 的候选通道，并需要以未缓存 RAW 验证具体启动方式。
+Finder 双击或“打开方式”可能触发完整下载，因此不属于可接受的流式 handoff 证据。
+CloudDrive 已读取区段的本地缓存与 Latent 派生预览缓存是两个独立的空间预算。
+
 ## Queue contract
 
 - Claim 使用 SQLite `BEGIN IMMEDIATE`，避免两个 worker 同时取得同一个 job。
@@ -116,5 +139,5 @@ HTTP 边界测试确认静态资源、JSON API 与缓存 JPEG 都能从 wheel �
 
 ## Next step
 
-下一步是运行按最近日期优先的长期后台 worker，并把吞吐量、预计剩余时间和暂停状态显示在 Library 界面。
-完成首批近期日期后，再验证真实规模下的日期分页和缓存淘汰。
+下一步是在真实规模下完善日期分页、搜索、Sequence 与 inspector 交互。
+DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。

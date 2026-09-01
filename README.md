@@ -8,6 +8,7 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 项目当前已完成 Phase 0，并进入 Phase 1 的 Library slice。
 Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
 本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
+首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
 
 ## Phase 0 spike
 
@@ -122,6 +123,13 @@ Latent 不依赖 Finder/macFUSE 的整文件物化来完成日常浏览。
 - JPEG 与视频优先使用存储服务提供的 thumbnail 或 preview URL。
 - 完整原片仅在用户明确打开、编辑或导出时获取。
 
+CloudDrive 1.0.16 在 macOS 上提供按需流式读取大文件的能力，但它与 Latent 的批量索引路径承担不同职责。
+批量 contact sheet 与 inspector 继续使用可验证的 HTTP Range，并在服务端忽略 Range 时拒绝读取完整响应。
+用户明确把原片交给 DxO 时，可以把 macFUSE 挂载路径作为候选 handoff 通道，使编辑器按自己的访问模式读取文件。
+Finder 双击或“打开方式”仍可能先要求完整下载，因此不能被 Latent 当作流式 handoff。
+直接 handoff 还需要用一张未缓存 RAW 做端到端验证，确认具体启动方式不会回退到 Finder 的完整物化路径。
+已经读取的原片区段会占用 CloudDrive 本地缓存，这部分空间与 Latent 自己的派生预览缓存相互独立。
+
 初始缓存方案为可配置的 8 GB 上限：
 
 - 约 3 GB 常驻 contact thumbnails
@@ -181,7 +189,7 @@ MVP 包含：
 
 完成真实档案索引、contact sheet、inspector、搜索、Sequence 和 DxO handoff。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
-完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，预览生成保留为独立、可分批恢复的后台阶段。
+完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
 
 ### Phase 2: Curator
 
