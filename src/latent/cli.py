@@ -8,6 +8,13 @@ import sys
 from functools import partial
 from pathlib import Path
 
+from .embeddings import (
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    DEFAULT_EMBEDDING_MODEL,
+    EmbeddingStore,
+    EmbeddingWorker,
+    load_embedding_assets,
+)
 from .errors import ConfigurationError, LatentError
 from .jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
 from .preview import MIB, ExifToolProbe, PreviewPipeline
@@ -21,6 +28,9 @@ from .storage import GIB, CacheManager, StateStore
 from .web_server import serve_library
 
 DEFAULT_STATE_DIR = Path.home() / "Library/Application Support/Latent/phase0"
+DEFAULT_EMBEDDING_MODEL_CACHE = (
+    Path.home() / "Library/Application Support/Latent/embedding-benchmark/models/siglip2-base"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,6 +141,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow binding to a non-loopback interface",
     )
     serve.set_defaults(handler=_run_serve)
+
+    embedding_sync = subparsers.add_parser(
+        "embedding-sync",
+        help="sync the local contact catalog into the durable embedding queue",
+    )
+    embedding_sync.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    embedding_sync.add_argument("--embedding-dir", type=Path)
+    embedding_sync.add_argument("--retry-failed", action="store_true")
+    embedding_sync.add_argument("--json", action="store_true")
+    embedding_sync.set_defaults(handler=_run_embedding_sync)
+
+    embedding_status = subparsers.add_parser(
+        "embedding-status",
+        help="inspect the separate local embedding queue and vector store",
+    )
+    embedding_status.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    embedding_status.add_argument("--embedding-dir", type=Path)
+    embedding_status.add_argument("--json", action="store_true")
+    embedding_status.set_defaults(handler=_run_embedding_status)
+
+    embedding_build = subparsers.add_parser(
+        "embedding-build",
+        help="encode a bounded number of queued local contact images",
+    )
+    embedding_build.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    embedding_build.add_argument("--embedding-dir", type=Path)
+    embedding_build.add_argument(
+        "--model-cache",
+        type=Path,
+        default=DEFAULT_EMBEDDING_MODEL_CACHE,
+    )
+    embedding_build.add_argument(
+        "--max-jobs",
+        type=_positive_int,
+        required=True,
+        help="required safety cap; a full-library value needs prior resource approval",
+    )
+    embedding_build.add_argument("--batch-size", type=_positive_int, default=8)
+    embedding_build.add_argument(
+        "--max-consecutive-failures",
+        type=_positive_int,
+        default=5,
+    )
+    embedding_build.add_argument("--retry-failed", action="store_true")
+    embedding_build.add_argument(
+        "--device",
+        choices=("auto", "mps", "cpu"),
+        default="auto",
+    )
+    embedding_build.add_argument("--json", action="store_true")
+    embedding_build.set_defaults(handler=_run_embedding_build)
     return parser
 
 
@@ -355,6 +416,143 @@ def _run_serve(args: argparse.Namespace) -> int:
         allow_remote=args.allow_remote,
     )
     return 0
+
+
+def _run_embedding_sync(args: argparse.Namespace) -> int:
+    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    assets = load_embedding_assets(args.state_dir)
+    with EmbeddingStore(embedding_dir) as store:
+        sync = store.sync_assets(assets, retry_failed=args.retry_failed)
+        payload = {"sync": sync.as_dict(), "status": store.status()}
+    _print_embedding_payload(payload, as_json=args.json)
+    return 0
+
+
+def _run_embedding_status(args: argparse.Namespace) -> int:
+    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    database_path = embedding_dir / "index.sqlite"
+    if not database_path.is_file():
+        payload: dict[str, object] = {
+            "exists": False,
+            "database_path": str(database_path),
+            "model_id": DEFAULT_EMBEDDING_MODEL,
+            "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
+            "source": "local_contact_cache",
+            "photo_network_bytes": 0,
+            "archive_modified": False,
+        }
+    else:
+        with EmbeddingStore(embedding_dir) as store:
+            payload = {"exists": True, **store.status()}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    elif not payload["exists"]:
+        print(f"Embedding store: not initialized at {database_path}")
+    else:
+        _print_embedding_status(payload)
+    return 0
+
+
+def _run_embedding_build(args: argparse.Namespace) -> int:
+    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    model_cache = args.model_cache.expanduser().resolve()
+    if not model_cache.is_dir():
+        raise ConfigurationError(f"local SigLIP2 model cache was not found: {model_cache}")
+    assets = load_embedding_assets(args.state_dir)
+    with EmbeddingStore(embedding_dir) as store:
+        sync = store.sync_assets(assets, retry_failed=args.retry_failed)
+        if store.job_counts()["pending"] == 0:
+            payload = {
+                "sync": sync.as_dict(),
+                "run": None,
+                "status": store.status(),
+            }
+        else:
+            try:
+                from .embedding_benchmark import SigLIP2Encoder, resolve_device
+
+                device = resolve_device(args.device)
+                encoder = SigLIP2Encoder(
+                    cache_dir=model_cache,
+                    device=device,
+                    local_files_only=True,
+                )
+            except ModuleNotFoundError as error:
+                raise ConfigurationError(
+                    "embedding runtime is not installed; use the isolated embedding environment"
+                ) from error
+            except (OSError, RuntimeError) as error:
+                raise ConfigurationError(
+                    f"local SigLIP2 model could not be loaded: {error}"
+                ) from error
+            run = EmbeddingWorker(
+                store,
+                encoder,
+                args.state_dir / "cache",
+            ).run(
+                max_jobs=args.max_jobs,
+                batch_size=args.batch_size,
+                max_consecutive_failures=args.max_consecutive_failures,
+                retry_failed=args.retry_failed,
+            )
+            payload = {
+                "sync": sync.as_dict(),
+                "run": {
+                    **run.as_dict(),
+                    "device": device,
+                    "model_load_seconds": encoder.load_seconds,
+                },
+                "status": store.status(),
+            }
+    _print_embedding_payload(payload, as_json=args.json)
+    return 0
+
+
+def _embedding_dir(state_dir: Path, requested: Path | None) -> Path:
+    if requested is not None:
+        return requested.expanduser().resolve()
+    return state_dir.expanduser().resolve() / "embeddings/siglip2-base"
+
+
+def _print_embedding_payload(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    sync = payload.get("sync")
+    if isinstance(sync, dict):
+        print(
+            "Embedding sync: "
+            f"{sync['discovered']} discovered, {sync['enqueued']} enqueued, "
+            f"{sync['unchanged']} unchanged, {sync['removed']} removed"
+        )
+    run = payload.get("run")
+    if isinstance(run, dict):
+        print(
+            "Embedding run: "
+            f"{run['processed']} processed, {run['succeeded']} succeeded, "
+            f"{run['failed']} failed"
+        )
+        print(
+            f"Local contacts only: {run['photo_network_bytes']} photo network bytes, "
+            "archive modified: no"
+        )
+    status = payload.get("status")
+    if isinstance(status, dict):
+        _print_embedding_status(status)
+
+
+def _print_embedding_status(payload: dict[str, object]) -> None:
+    jobs = payload["jobs"]
+    assert isinstance(jobs, dict)
+    print(f"Embedding store: {payload['database_path']}")
+    print(f"Model: {payload['model_id']} ({payload['dimensions']}D {payload['dtype']})")
+    print(
+        "Embedding jobs: "
+        f"{jobs['pending']} pending, {jobs['running']} running, "
+        f"{jobs['succeeded']} succeeded, {jobs['failed']} failed"
+    )
+    print(f"Vectors: {payload['vectors']}, {_format_bytes(int(payload['vector_bytes']))}")
+    print("Photo network: 0 B; archive modified: no")
 
 
 def _print_spike(payload: dict[str, object]) -> None:

@@ -74,9 +74,41 @@ Transformers 5.16.1 加载 SigLIP2 时会输出 `bos_token_id` 和 `eos_token_id
 
 只有在用户确认这份预算后，才启动 25,793 张全库 embedding job。
 
+## Durable queue evidence
+
+模型基准之后已经实现独立的 model-specific embedding store。
+它使用 schema version 1、SigLIP2 model ID、768 维和 float16 dtype 作为打开数据库时必须匹配的固定契约。
+Library 主索引仍位于 `phase0/index.sqlite`，embedding queue 与 vectors 位于 `phase0/embeddings/siglip2-base/index.sqlite`，两者物理分离。
+
+`embedding-sync` 只读取 Library SQLite 中 fingerprint 与 contact cache fingerprint 一致的资产。
+它不会打开 contact JPEG、加载模型或创建 CloudDrive client。
+首次真实 sync 得到 25,793 pending、0 running、0 succeeded、0 failed 和 0 vectors。
+第二次真实 sync 得到 25,793 unchanged、0 enqueued、0 removed，证明相同 fingerprint 不会重复排队。
+当前独立 queue database 占用约 16 MiB，integrity check 为 `ok`。
+
+生产 worker 使用 required `--max-jobs` 作为显式安全上限。
+它按最多 8 张 claim，成功向量与 job 状态在同一 SQLite transaction 中提交。
+运行中断会把仍在 running 的 claim 释放回 pending，超时 running job 会在下一轮恢复。
+batch 失败时会降级到逐张编码，以隔离单张损坏 contact；连续五张失败时停止并释放尚未处理的 claim。
+
+真实生产链路 smoke test 使用临时 embedding directory 和 3 张本地 contact。
+SigLIP2 强制 `local_files_only=True`，MPS 编码耗时 1.31 秒，3 succeeded、0 failed、0 running，共写入 4,608 bytes vector data。
+正式 embedding store 在 smoke test 后仍保持 25,793 pending 和 0 vectors，因此没有越过全库确认闸门。
+
+可重复的本地控制命令为：
+
+```bash
+uv run latent embedding-status --json
+uv run latent embedding-sync --json
+latent embedding-build --max-jobs <bounded-count> --batch-size 8 --device mps --json
+```
+
+`embedding-build` 必须从已经安装 embedding dependency group 的隔离环境运行。
+全库 `<bounded-count>` 仍然需要用户先确认资源预算。
+
 ## Implementation consequence
 
-第一版索引应把 float16 vector 与 asset fingerprint 保存在可重建的独立 SQLite store 中。
+第一版索引已经把 float16 vector 与 asset fingerprint 保存在可重建的独立 SQLite store 中。
 25,793 个 768 维向量可以在查询时加载为约 75.6 MiB 的 float32 matrix，直接 cosine search 足够简单，也避免提前引入 ANN 索引的更新复杂度。
 相似照片不需要再次运行图像模型。
 自然语言搜索需要 SigLIP2 text encoder，服务可以在第一次语义查询时延迟加载并复用模型。

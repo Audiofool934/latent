@@ -32,6 +32,8 @@ uv run latent scan-tree --scan-id 1 --max-directories 100
 uv run latent scan-tree-cancel --scan-id 1
 uv run latent work --max-jobs 25
 uv run latent status
+uv run latent embedding-status
+uv run latent embedding-sync
 uv run latent serve
 uv run pytest
 ```

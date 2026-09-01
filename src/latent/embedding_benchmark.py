@@ -107,15 +107,29 @@ class MobileCLIP2Encoder:
 class SigLIP2Encoder:
     model_id = "google/siglip2-base-patch16-224"
 
-    def __init__(self, *, cache_dir: Path, device: str) -> None:
+    def __init__(
+        self,
+        *,
+        cache_dir: Path,
+        device: str,
+        local_files_only: bool = False,
+    ) -> None:
         import torch
         from transformers import AutoModel, AutoProcessor
 
         started = time.perf_counter()
         self._torch = torch
         self.device = device
-        self._model = AutoModel.from_pretrained(self.model_id, cache_dir=cache_dir)
-        self._processor = AutoProcessor.from_pretrained(self.model_id, cache_dir=cache_dir)
+        self._model = AutoModel.from_pretrained(
+            self.model_id,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+        self._processor = AutoProcessor.from_pretrained(
+            self.model_id,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
         self._model.eval().to(device)
         self.load_seconds = time.perf_counter() - started
 
