@@ -10,6 +10,7 @@ Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内�
 本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
 首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
 高容量日期按 250 张一批增量加载，当前日期内的文件名、相机和镜头搜索由本地索引完成，不受单页上限影响。
+本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索推荐模型，全库索引仍等待资源预算确认。
 
 ## Phase 0 spike
 
@@ -39,6 +40,7 @@ uv run pytest
 CloudDrive device token 只从应用自己的本地 plist 读取到内存，不会写入项目、SQLite、缓存文件或命令输出。
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
+本地图文模型的质量、性能与资源证据见 [embedding benchmark](docs/embedding-benchmark.md)。
 `latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
 `scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
 只有明确传入 `--include-hidden` 才会遍历这些目录。
