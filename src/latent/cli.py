@@ -27,6 +27,12 @@ from .provider import (
 from .search import DEFAULT_SIGLIP2_MODEL_CACHE
 from .storage import GIB, CacheManager, StateStore
 from .web_server import serve_library
+from .workspace import (
+    DEFAULT_WORKSPACE_DIR,
+    WorkspaceStore,
+    load_workspace_export,
+    write_workspace_export,
+)
 
 DEFAULT_STATE_DIR = Path.home() / "Library/Application Support/Latent/phase0"
 
@@ -201,6 +207,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     embedding_build.add_argument("--json", action="store_true")
     embedding_build.set_defaults(handler=_run_embedding_build)
+
+    workspace_status = subparsers.add_parser(
+        "workspace-status",
+        help="inspect the separate user-authored workspace",
+    )
+    workspace_status.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=DEFAULT_WORKSPACE_DIR,
+    )
+    workspace_status.add_argument("--json", action="store_true")
+    workspace_status.set_defaults(handler=_run_workspace_status)
+
+    workspace_export = subparsers.add_parser(
+        "workspace-export",
+        help="atomically export user-authored workspace state",
+    )
+    workspace_export.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=DEFAULT_WORKSPACE_DIR,
+    )
+    workspace_export.add_argument("--output", type=Path, required=True)
+    workspace_export.add_argument("--json", action="store_true")
+    workspace_export.set_defaults(handler=_run_workspace_export)
+
+    workspace_import = subparsers.add_parser(
+        "workspace-import",
+        help="merge a workspace export without overwriting conflicts",
+    )
+    workspace_import.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=DEFAULT_WORKSPACE_DIR,
+    )
+    workspace_import.add_argument("--input", type=Path, required=True)
+    workspace_import.add_argument("--json", action="store_true")
+    workspace_import.set_defaults(handler=_run_workspace_import)
     return parser
 
 
@@ -517,6 +561,64 @@ def _run_embedding_build(args: argparse.Namespace) -> int:
                 "status": store.status(),
             }
     _print_embedding_payload(payload, as_json=args.json)
+    return 0
+
+
+def _run_workspace_status(args: argparse.Namespace) -> int:
+    with WorkspaceStore(args.workspace_dir) as store:
+        payload = store.status()
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"Workspace: {payload['database_path']}")
+        print(f"Sequences: {payload['sequences']}; items: {payload['items']}")
+        print(f"Integrity: {payload['database_integrity']}; archive modified: no")
+    return 0
+
+
+def _run_workspace_export(args: argparse.Namespace) -> int:
+    with WorkspaceStore(args.workspace_dir) as store:
+        payload = store.export_payload()
+    try:
+        destination = write_workspace_export(args.output, payload)
+    except OSError as error:
+        raise ConfigurationError(f"workspace export failed: {error}") from error
+    result = {
+        "output": str(destination),
+        "sequences": len(payload["sequences"]),
+        "archive_modified": False,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"Workspace export: {destination}")
+        print(f"Sequences: {result['sequences']}; archive modified: no")
+    return 0
+
+
+def _run_workspace_import(args: argparse.Namespace) -> int:
+    try:
+        payload = load_workspace_export(args.input)
+        with WorkspaceStore(args.workspace_dir) as store:
+            outcome = store.merge_import(payload)
+            status = store.status()
+    except (OSError, ValueError) as error:
+        raise ConfigurationError(f"workspace import failed: {error}") from error
+    result = {
+        "import": outcome.as_dict(),
+        "status": status,
+        "conflicts_overwritten": 0,
+        "archive_modified": False,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(
+            "Workspace import: "
+            f"{outcome.imported} imported, {outcome.unchanged} unchanged, "
+            f"{outcome.conflicts} conflicts skipped"
+        )
+        print("Conflicts overwritten: 0; archive modified: no")
     return 0
 
 

@@ -13,6 +13,7 @@ Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内�
 本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索模型。
 跨日期语义搜索、相似照片 API 和对应界面已经在 3 张真实 contact preview 的隔离向量库上跑通。
 第一版 grounded Curator 已能把相似度、拍摄日期和一致的 EXIF 汇成可追溯观察与 Sequence seed，不生成地点、身份或故事。
+独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改和非覆盖式导入导出契约，网页接入仍在进行。
 正式图库仍保持 25,793 个 pending、0 个 vector，全库索引等待资源预算确认。
 
 ## Phase 0 spike
@@ -37,6 +38,9 @@ uv run latent work --max-jobs 25
 uv run latent status
 uv run latent embedding-status
 uv run latent embedding-sync
+uv run latent workspace-status
+uv run latent workspace-export --output ./latent-workspace.json
+uv run latent workspace-import --input ./latent-workspace.json
 uv run latent serve
 uv run pytest
 ```
@@ -49,6 +53,7 @@ CloudDrive device token 只从应用自己的本地 plist 读取到内存，不�
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
 本地图文模型的质量、性能与资源证据见 [embedding benchmark](docs/embedding-benchmark.md)。
+用户创作状态的持久化与交换契约见 [writable workspace](docs/writable-workspace.md)。
 `latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
 `scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
 只有明确传入 `--include-hidden` 才会遍历这些目录。
