@@ -151,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--embedding-dir", type=Path)
     serve.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=DEFAULT_WORKSPACE_DIR,
+    )
+    serve.add_argument(
         "--semantic-device",
         choices=("auto", "mps", "cpu"),
         default="auto",
@@ -468,6 +473,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         port=args.port,
         allow_remote=args.allow_remote,
         embedding_dir=args.embedding_dir,
+        workspace_dir=args.workspace_dir,
         model_cache=args.model_cache,
         semantic_device=args.semantic_device,
     )

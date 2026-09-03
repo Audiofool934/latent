@@ -9,7 +9,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 from PIL import Image
@@ -24,6 +24,7 @@ from latent.models import PreviewLocation, ProbeResult, RemoteAsset
 from latent.search import SemanticSearch, VectorIndex
 from latent.storage import CacheManager, StateStore
 from latent.web_server import LibraryRequestHandler, LibraryServer, _is_loopback
+from latent.workspace import WorkspaceStore
 
 
 class FakeTextEncoder:
@@ -161,6 +162,7 @@ def _running_server(
         state_dir,
         vector_index=vector_index,
         semantic_search=semantic_search,
+        workspace_dir=state_dir / "workspace",
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -178,6 +180,23 @@ def _get_json(url: str) -> tuple[dict[str, object], dict[str, str]]:
         payload = json.loads(response.read())
         headers = dict(response.headers.items())
     return payload, headers
+
+
+def _request_json(
+    url: str,
+    *,
+    method: str,
+    payload: dict[str, object] | None = None,
+) -> tuple[dict[str, object], int]:
+    data = None if payload is None else json.dumps(payload).encode()
+    request = Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+    )
+    with urlopen(request, timeout=2) as response:
+        return json.loads(response.read()), response.status
 
 
 def test_server_reads_only_seeded_local_index_and_cache(tmp_path: Path) -> None:
@@ -382,12 +401,115 @@ def test_semantic_apis_fail_closed_until_vectors_exist(tmp_path: Path) -> None:
         assert unavailable_curator.value.code == 503
 
 
+def test_sequence_api_persists_stable_archive_references_and_order(tmp_path: Path) -> None:
+    _seed_pageable_library(tmp_path)
+
+    with _running_server(tmp_path) as base_url:
+        initial, _ = _get_json(f"{base_url}/api/sequences")
+        assert initial["sequences"] == []
+        library, _ = _get_json(f"{base_url}/api/library")
+        assert library["workspace"] == {"sequences": 0, "items": 0, "writable": True}
+
+        created, status = _request_json(
+            f"{base_url}/api/sequences",
+            method="POST",
+            payload={"name": "Field motion", "note": "First pass"},
+        )
+        assert status == 201
+        sequence_id = created["sequence"]["id"]
+        assert created["archive_modified"] is False
+
+        added, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}/items",
+            method="POST",
+            payload={"asset_ids": [1, 3]},
+        )
+        assert added["added"] == 2
+        assert added["skipped"] == 0
+        assert [item["name"] for item in added["sequence"]["items"]] == [
+            "DSC00001.ARW",
+            "DSC00003.ARW",
+        ]
+        assert all(item["library_status"] == "current" for item in added["sequence"]["items"])
+        assert all(item["asset"]["contact_url"] for item in added["sequence"]["items"])
+
+        updated, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}",
+            method="PATCH",
+            payload={"name": "Field rhythm", "note": "Source and echo"},
+        )
+        assert updated["sequence"]["name"] == "Field rhythm"
+        item_ids = [item["id"] for item in updated["sequence"]["items"]]
+
+        reordered, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}/items/order",
+            method="PUT",
+            payload={"item_ids": list(reversed(item_ids))},
+        )
+        assert [item["id"] for item in reordered["sequence"]["items"]] == list(reversed(item_ids))
+
+        removed, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}/items/{item_ids[0]}",
+            method="DELETE",
+        )
+        assert removed["sequence"]["item_count"] == 1
+
+        deleted, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}",
+            method="DELETE",
+        )
+        assert deleted == {"deleted": True, "archive_modified": False}
+
+    with WorkspaceStore(tmp_path / "workspace") as workspace:
+        assert workspace.status()["sequences"] == 0
+
+
+def test_sequence_api_rejects_non_json_and_missing_assets(tmp_path: Path) -> None:
+    _seed_library(tmp_path)
+
+    with _running_server(tmp_path) as base_url:
+        request = Request(
+            f"{base_url}/api/sequences",
+            data=b"name=unsafe",
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as non_json:
+            urlopen(request, timeout=2)
+        assert non_json.value.code == 400
+
+        created, _ = _request_json(
+            f"{base_url}/api/sequences",
+            method="POST",
+            payload={"name": "Test"},
+        )
+        sequence_id = created["sequence"]["id"]
+        with pytest.raises(HTTPError) as missing_asset:
+            _request_json(
+                f"{base_url}/api/sequences/{sequence_id}/items",
+                method="POST",
+                payload={"asset_ids": [999]},
+            )
+        assert missing_asset.value.code == 404
+
+
 def test_loopback_detection_is_explicit() -> None:
     assert _is_loopback("127.0.0.1")
     assert _is_loopback("::1")
     assert _is_loopback("localhost")
     assert not _is_loopback("0.0.0.0")
     assert not _is_loopback("example.test")
+
+
+def test_remote_bound_server_disables_workspace_mutations(tmp_path: Path) -> None:
+    server = LibraryServer(
+        ("0.0.0.0", 0),
+        tmp_path,
+        workspace_dir=tmp_path / "workspace",
+    )
+    try:
+        assert server.workspace_writes_enabled is False
+    finally:
+        server.server_close()
 
 
 def test_handler_silently_stops_after_client_disconnect() -> None:

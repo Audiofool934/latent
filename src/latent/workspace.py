@@ -480,6 +480,11 @@ def write_workspace_export(path: Path, payload: Mapping[str, Any]) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, destination)
+        directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()

@@ -970,7 +970,8 @@ class StateStore:
         rows = self.connection.execute(
             f"""
             SELECT
-                a.id, a.name, a.remote_path, a.size_bytes, a.capture_at,
+                a.id, a.provider, a.fingerprint, a.name, a.remote_path,
+                a.size_bytes, a.capture_at,
                 a.camera_model, a.lens_model, a.preview_width, a.preview_height,
                 contact.relative_path AS contact_path,
                 preview.relative_path AS preview_path
@@ -985,6 +986,37 @@ class StateStore:
         ).fetchall()
         by_id = {int(row["id"]): dict(row) for row in rows}
         return [by_id[asset_id] for asset_id in asset_ids if asset_id in by_id]
+
+    def library_assets_by_identities(
+        self,
+        identities: list[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        if not identities:
+            return []
+        if len(identities) > 500:
+            raise ValueError("asset identity lookup is limited to 500 items")
+        unique_identities = list(dict.fromkeys(identities))
+        conditions = " OR ".join("(a.provider=? AND a.remote_path=?)" for _ in unique_identities)
+        parameters = [value for identity in unique_identities for value in identity]
+        rows = self.connection.execute(
+            f"""
+            SELECT
+                a.id, a.provider, a.fingerprint, a.name, a.remote_path,
+                a.size_bytes, a.capture_at,
+                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                contact.relative_path AS contact_path,
+                preview.relative_path AS preview_path
+            FROM assets AS a
+            JOIN cache_entries AS contact
+              ON contact.asset_id = a.id AND contact.variant = 'contact'
+            LEFT JOIN cache_entries AS preview
+              ON preview.asset_id = a.id AND preview.variant = 'preview'
+            WHERE {conditions}
+            """,
+            parameters,
+        ).fetchall()
+        by_identity = {(str(row["provider"]), str(row["remote_path"])): dict(row) for row in rows}
+        return [by_identity[identity] for identity in identities if identity in by_identity]
 
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
