@@ -136,6 +136,32 @@ button {
   letter-spacing: 0.14em;
 }
 
+.section-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inline-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.inline-action:hover,
+.inline-action:focus-visible {
+  color: var(--text);
+}
+
+.inline-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .metric-row {
   display: flex;
   justify-content: space-between;
@@ -155,6 +181,66 @@ button {
   min-height: 0;
   flex: 1;
   overflow: hidden;
+}
+
+.sequence-section {
+  max-height: 206px;
+  overflow: hidden;
+}
+
+.sequence-list {
+  max-height: 144px;
+  margin: 10px -8px 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.sequence-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-left: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sequence-button:hover {
+  background: #15191a;
+  color: var(--text);
+}
+
+.sequence-button[aria-current="true"] {
+  border-left-color: var(--signal);
+  background: #181d1d;
+  color: var(--text);
+}
+
+.sequence-button-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sequence-button-count,
+.sequence-empty {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sequence-empty {
+  margin: 12px 0 0;
+  font-size: 9px;
+}
+
+.sequence-empty[hidden] {
+  display: none;
 }
 
 .date-list {
@@ -385,6 +471,12 @@ kbd {
 
 .image-well img.loaded {
   opacity: 1;
+}
+
+.missing-frame {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.08em;
 }
 
 .frame-index {
@@ -674,6 +766,43 @@ kbd {
   margin-top: 12px;
 }
 
+.sequence-select {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 12px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 9px;
+}
+
+.sequence-control-row,
+.sequence-order-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.sequence-order-controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sequence-order-controls[hidden] {
+  display: none;
+}
+
+.sequence-status {
+  min-height: 1.4em;
+  margin: 10px 0 0;
+  color: var(--faint);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .relation-evidence {
   margin: 12px 0 0;
   color: var(--faint);
@@ -729,6 +858,81 @@ kbd {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 9px;
   line-height: 1.5;
+}
+
+.sequence-dialog {
+  width: min(390px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 24px 90px rgb(0 0 0 / 64%);
+}
+
+.sequence-dialog::backdrop {
+  background: rgb(0 0 0 / 68%);
+  backdrop-filter: blur(3px);
+}
+
+.sequence-form {
+  display: grid;
+  gap: 17px;
+  padding: 22px;
+}
+
+.sequence-form h2 {
+  margin: 8px 0 0;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+}
+
+.sequence-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.sequence-form input,
+.sequence-form textarea {
+  width: 100%;
+  padding: 9px 10px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  outline: 0;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.sequence-form input:focus,
+.sequence-form textarea:focus {
+  border-color: var(--line-strong);
+}
+
+.sequence-form-error {
+  min-height: 1.4em;
+  margin: 0;
+  color: var(--danger);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 10px;
+}
+
+.sequence-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.primary-button {
+  border-color: var(--line-strong);
+  color: var(--text);
 }
 
 .curator-limitations {

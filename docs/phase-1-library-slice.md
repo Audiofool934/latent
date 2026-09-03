@@ -210,5 +210,5 @@ HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 
 
 ## Next step
 
-下一步是在资源预算确认后构建全库 embedding，并把 Curator 的 Sequence seed 接入可独立备份的 writable workspace。
+下一步是在资源预算确认后构建全库 embedding，并用完整向量覆盖验证搜索、Curator 与 Sequence 工作流的实际质量和性能。
 DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。

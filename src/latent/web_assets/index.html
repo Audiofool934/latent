@@ -45,6 +45,15 @@
           <div class="date-list" id="dateList"></div>
         </section>
 
+        <section class="sidebar-section sequence-section" aria-labelledby="sequencesLabel">
+          <div class="section-heading-row">
+            <div class="section-label" id="sequencesLabel">SEQUENCES</div>
+            <button class="inline-action" id="newSequenceButton" type="button">New</button>
+          </div>
+          <div class="sequence-list" id="sequenceList"></div>
+          <p class="sequence-empty" id="sequenceEmpty">No saved sequences</p>
+        </section>
+
         <footer class="sidebar-footer">
           <div class="local-status">
             <span class="status-dot" aria-hidden="true"></span>
@@ -145,6 +154,30 @@
             <button class="text-button" id="copyPathButton" type="button">Copy archive path</button>
           </section>
 
+          <section class="metadata-section" aria-labelledby="sequenceControlLabel">
+            <div class="section-label" id="sequenceControlLabel">SEQUENCE</div>
+            <select class="sequence-select" id="activeSequenceSelect" aria-label="Active Sequence">
+              <option value="">No Sequence yet</option>
+            </select>
+            <div class="sequence-control-row">
+              <button class="text-button" id="inspectorNewSequenceButton" type="button">New</button>
+              <button class="text-button" id="editSequenceButton" type="button">Edit</button>
+              <button class="text-button" id="openSequenceButton" type="button">Open</button>
+            </div>
+            <button class="text-button discover-button" id="addToSequenceButton" type="button">
+              Add this frame
+            </button>
+            <div class="sequence-order-controls" id="sequenceOrderControls" hidden>
+              <button class="text-button" id="moveSequenceEarlierButton" type="button">
+                Move earlier
+              </button>
+              <button class="text-button" id="moveSequenceLaterButton" type="button">
+                Move later
+              </button>
+            </div>
+            <p class="sequence-status" id="sequenceStatus" aria-live="polite"></p>
+          </section>
+
           <section class="metadata-section" aria-labelledby="discoverLabel">
             <div class="section-label" id="discoverLabel">DISCOVER</div>
             <button class="text-button discover-button" id="findSimilarButton" type="button">
@@ -158,11 +191,38 @@
               <p class="curator-headline" id="curatorHeadline"></p>
               <ul class="curator-observations" id="curatorObservations"></ul>
               <p class="curator-sequence" id="curatorSequence"></p>
+              <button class="text-button discover-button" id="addCuratorSeedButton" type="button">
+                Add seed to active Sequence
+              </button>
               <p class="curator-limitations" id="curatorLimitations"></p>
             </div>
           </section>
         </div>
       </aside>
     </div>
+
+    <dialog class="sequence-dialog" id="sequenceDialog">
+      <form class="sequence-form" id="sequenceForm">
+        <div>
+          <div class="section-label">WRITABLE WORKSPACE</div>
+          <h2 id="sequenceDialogTitle">New Sequence</h2>
+        </div>
+        <label>
+          <span>Name</span>
+          <input id="sequenceNameInput" maxlength="120" required autocomplete="off">
+        </label>
+        <label>
+          <span>Note</span>
+          <textarea id="sequenceNoteInput" maxlength="10000" rows="4"></textarea>
+        </label>
+        <p class="sequence-form-error" id="sequenceFormError" aria-live="polite"></p>
+        <div class="sequence-dialog-actions">
+          <button class="text-button" id="sequenceCancelButton" type="button">Cancel</button>
+          <button class="text-button primary-button" id="sequenceSubmitButton" type="submit">
+            Create Sequence
+          </button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

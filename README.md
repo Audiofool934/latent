@@ -13,7 +13,7 @@ Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内�
 本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索模型。
 跨日期语义搜索、相似照片 API 和对应界面已经在 3 张真实 contact preview 的隔离向量库上跑通。
 第一版 grounded Curator 已能把相似度、拍摄日期和一致的 EXIF 汇成可追溯观察与 Sequence seed，不生成地点、身份或故事。
-独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改和非覆盖式导入导出契约，网页接入仍在进行。
+独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改、网页交互和非覆盖式导入导出契约。
 正式图库仍保持 25,793 个 pending、0 个 vector，全库索引等待资源预算确认。
 
 ## Phase 0 spike
@@ -207,7 +207,7 @@ MVP 包含：
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
 日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
-embedding queue、语义搜索和相似照片链路已经完成有界验证，全库向量构建、Curator 和 Sequence 仍在本轮目标内。
+embedding queue、语义搜索、相似照片、grounded Curator 和 Sequence 链路已经完成有界验证，全库向量构建仍等待资源确认。
 
 ### Phase 2: Curator expansion
 
@@ -224,5 +224,5 @@ embedding queue、语义搜索和相似照片链路已经完成有界验证，�
 - 8 GB 默认缓存是否需要按磁盘空间动态调整
 - 全库 embedding 的调度与可接受资源窗口
 - Curator 输出的保存、重算与版本边界
-- Writable workspace 的备份与交换格式
-- Sequence 第一版的交互粒度与导出目标
+- Writable workspace 的自动备份频率与目标位置
+- Sequence 的衍生导出目标与跨设备同步边界

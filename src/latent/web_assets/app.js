@@ -1,6 +1,9 @@
 "use strict";
 
 const elements = {
+  activeSequenceSelect: document.querySelector("#activeSequenceSelect"),
+  addCuratorSeedButton: document.querySelector("#addCuratorSeedButton"),
+  addToSequenceButton: document.querySelector("#addToSequenceButton"),
   appShell: document.querySelector("#appShell"),
   archivePath: document.querySelector("#archivePath"),
   cachedAssetCount: document.querySelector("#cachedAssetCount"),
@@ -17,6 +20,7 @@ const elements = {
   dateList: document.querySelector("#dateList"),
   dateTitle: document.querySelector("#dateTitle"),
   embeddingReadyCount: document.querySelector("#embeddingReadyCount"),
+  editSequenceButton: document.querySelector("#editSequenceButton"),
   emptyState: document.querySelector("#emptyState"),
   findSimilarButton: document.querySelector("#findSimilarButton"),
   frameCount: document.querySelector("#frameCount"),
@@ -25,6 +29,7 @@ const elements = {
   inspectorEmpty: document.querySelector("#inspectorEmpty"),
   inspectorImage: document.querySelector("#inspectorImage"),
   inspectorTitle: document.querySelector("#inspectorTitle"),
+  inspectorNewSequenceButton: document.querySelector("#inspectorNewSequenceButton"),
   librarySearch: document.querySelector("#librarySearch"),
   loadingLabel: document.querySelector("#loadingLabel"),
   loadMoreButton: document.querySelector("#loadMoreButton"),
@@ -34,6 +39,10 @@ const elements = {
   metaSize: document.querySelector("#metaSize"),
   metaTaken: document.querySelector("#metaTaken"),
   mobileDateSelect: document.querySelector("#mobileDateSelect"),
+  moveSequenceEarlierButton: document.querySelector("#moveSequenceEarlierButton"),
+  moveSequenceLaterButton: document.querySelector("#moveSequenceLaterButton"),
+  newSequenceButton: document.querySelector("#newSequenceButton"),
+  openSequenceButton: document.querySelector("#openSequenceButton"),
   paginationProgress: document.querySelector("#paginationProgress"),
   paginationStatus: document.querySelector("#paginationStatus"),
   previewDimensions: document.querySelector("#previewDimensions"),
@@ -41,23 +50,42 @@ const elements = {
   readyJobCount: document.querySelector("#readyJobCount"),
   relationEvidence: document.querySelector("#relationEvidence"),
   resultModeLabel: document.querySelector("#resultModeLabel"),
+  sequenceCancelButton: document.querySelector("#sequenceCancelButton"),
+  sequenceDialog: document.querySelector("#sequenceDialog"),
+  sequenceDialogTitle: document.querySelector("#sequenceDialogTitle"),
+  sequenceEmpty: document.querySelector("#sequenceEmpty"),
+  sequenceForm: document.querySelector("#sequenceForm"),
+  sequenceFormError: document.querySelector("#sequenceFormError"),
+  sequenceList: document.querySelector("#sequenceList"),
+  sequenceNameInput: document.querySelector("#sequenceNameInput"),
+  sequenceNoteInput: document.querySelector("#sequenceNoteInput"),
+  sequenceOrderControls: document.querySelector("#sequenceOrderControls"),
+  sequenceStatus: document.querySelector("#sequenceStatus"),
+  sequenceSubmitButton: document.querySelector("#sequenceSubmitButton"),
 };
 
 const state = {
   assets: [],
+  activeSequenceId: null,
   controller: null,
+  currentSequence: null,
+  curatorSeedAssetIds: [],
   curatorRequestSerial: 0,
   currentDate: null,
   dates: [],
   hasMore: false,
   embeddingCount: 0,
+  editingSequenceId: null,
   loading: false,
   mode: "date",
+  openSequenceAfterSave: false,
   query: "",
   relationBasis: null,
   requestSerial: 0,
+  sequences: [],
   selectedIndex: -1,
   total: 0,
+  workspaceWritable: false,
 };
 
 const PAGE_SIZE = 250;
@@ -77,6 +105,22 @@ async function requestJSON(url, signal = undefined) {
   return payload;
 }
 
+async function sendJSON(url, method, payload = undefined) {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.message || `Workspace request failed with ${response.status}`);
+  }
+  return result;
+}
+
 async function boot() {
   try {
     const library = await requestJSON("/api/library");
@@ -85,11 +129,21 @@ async function boot() {
     elements.readyJobCount.textContent = String(library.preview_jobs.succeeded);
     elements.queuedJobCount.textContent = String(library.preview_jobs.pending);
     state.embeddingCount = library.embedding_index?.indexed_assets || 0;
+    state.workspaceWritable = library.workspace?.writable === true;
     elements.embeddingReadyCount.textContent = String(state.embeddingCount);
     renderDates();
+    try {
+      await refreshSequences();
+    } catch {
+      state.sequences = [];
+      state.activeSequenceId = null;
+      renderSequences();
+      updateSequenceControls();
+    }
     setupPaginationObserver();
     const parameters = new URLSearchParams(window.location.search);
     const requested = parameters.get("date");
+    const requestedSequence = parameters.get("sequence");
     const requestedQuery = (parameters.get("q") || "").trim();
     const initialDate = state.dates.some((item) => item.capture_date === requested)
       ? requested
@@ -98,7 +152,11 @@ async function boot() {
       state.currentDate = initialDate;
       elements.librarySearch.value = requestedQuery;
       updateDateChrome();
-      await resetResults(requestedQuery);
+      if (requestedSequence && state.sequences.some((item) => item.id === requestedSequence)) {
+        await openSequence(requestedSequence);
+      } else {
+        await resetResults(requestedQuery);
+      }
     } else {
       showEmpty("NO CACHED FRAMES", "Run the preview worker to populate the local index.");
     }
@@ -134,6 +192,83 @@ function renderDates() {
   }
 }
 
+async function refreshSequences(preferredId = state.activeSequenceId) {
+  const payload = await requestJSON("/api/sequences");
+  state.sequences = payload.sequences;
+  state.activeSequenceId = state.sequences.some((item) => item.id === preferredId)
+    ? preferredId
+    : state.sequences[0]?.id || null;
+  renderSequences();
+  updateSequenceControls();
+}
+
+function renderSequences() {
+  elements.sequenceList.replaceChildren();
+  elements.activeSequenceSelect.replaceChildren();
+  elements.sequenceEmpty.hidden = state.sequences.length > 0;
+
+  if (state.sequences.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No Sequence yet";
+    elements.activeSequenceSelect.append(option);
+  }
+
+  for (const sequence of state.sequences) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sequence-button";
+    button.dataset.sequenceId = sequence.id;
+    button.setAttribute(
+      "aria-current",
+      state.mode === "sequence" && state.currentSequence?.id === sequence.id ? "true" : "false",
+    );
+    button.addEventListener("click", () => void openSequence(sequence.id));
+
+    const name = document.createElement("span");
+    name.className = "sequence-button-name";
+    name.textContent = sequence.name;
+    const count = document.createElement("span");
+    count.className = "sequence-button-count";
+    count.textContent = String(sequence.item_count);
+    button.append(name, count);
+    elements.sequenceList.append(button);
+
+    const option = document.createElement("option");
+    option.value = sequence.id;
+    option.textContent = `${sequence.name} (${sequence.item_count})`;
+    elements.activeSequenceSelect.append(option);
+  }
+  elements.activeSequenceSelect.value = state.activeSequenceId || "";
+}
+
+function setActiveSequence(sequenceId) {
+  state.activeSequenceId = state.sequences.some((item) => item.id === sequenceId)
+    ? sequenceId
+    : null;
+  renderSequences();
+  updateSequenceControls();
+}
+
+function updateSequenceControls() {
+  const active = state.sequences.find((item) => item.id === state.activeSequenceId);
+  const asset = state.assets[state.selectedIndex];
+  const canWrite = state.workspaceWritable;
+  elements.activeSequenceSelect.disabled = !canWrite || state.sequences.length === 0;
+  elements.newSequenceButton.disabled = !canWrite;
+  elements.inspectorNewSequenceButton.disabled = !canWrite;
+  elements.editSequenceButton.disabled = !canWrite || !active;
+  elements.openSequenceButton.disabled = !active;
+  elements.addToSequenceButton.disabled = !canWrite || !active || !asset?.id;
+  elements.addCuratorSeedButton.disabled =
+    !canWrite || !active || state.curatorSeedAssetIds.length === 0;
+  const ordering = state.mode === "sequence" && state.currentSequence !== null;
+  elements.sequenceOrderControls.hidden = !ordering;
+  elements.moveSequenceEarlierButton.disabled = !ordering || state.selectedIndex <= 0;
+  elements.moveSequenceLaterButton.disabled =
+    !ordering || state.selectedIndex < 0 || state.selectedIndex >= state.assets.length - 1;
+}
+
 async function loadDate(captureDate) {
   if (!captureDate || (captureDate === state.currentDate && state.mode === "date")) {
     return;
@@ -144,6 +279,7 @@ async function loadDate(captureDate) {
   const url = new URL(window.location.href);
   url.searchParams.set("date", captureDate);
   url.searchParams.delete("q");
+  url.searchParams.delete("sequence");
   window.history.replaceState({}, "", url);
   await resetResults("");
 }
@@ -172,8 +308,10 @@ function appendCards(startIndex) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "photo-card";
-    if (state.mode !== "date") {
+    if (state.mode === "semantic" || state.mode === "similar") {
       card.classList.add("ranked-card");
+    } else if (state.mode === "sequence") {
+      card.classList.add("sequence-card");
     }
     card.dataset.index = String(index);
     card.setAttribute("aria-label", `Inspect ${asset.name}`);
@@ -182,16 +320,24 @@ function appendCards(startIndex) {
 
     const imageWell = document.createElement("span");
     imageWell.className = "image-well";
-    const image = document.createElement("img");
-    image.src = asset.contact_url;
-    image.alt = asset.name;
-    image.loading = index < 12 ? "eager" : "lazy";
-    image.decoding = "async";
-    image.addEventListener("load", () => image.classList.add("loaded"));
+    if (asset.contact_url) {
+      const image = document.createElement("img");
+      image.src = asset.contact_url;
+      image.alt = asset.name;
+      image.loading = index < 12 ? "eager" : "lazy";
+      image.decoding = "async";
+      image.addEventListener("load", () => image.classList.add("loaded"));
+      imageWell.append(image);
+    } else {
+      const missing = document.createElement("span");
+      missing.className = "missing-frame";
+      missing.textContent = "LOCAL PREVIEW MISSING";
+      imageWell.append(missing);
+    }
     const frameIndex = document.createElement("span");
     frameIndex.className = "frame-index";
     frameIndex.textContent = String(asset.rank || index + 1).padStart(2, "0");
-    imageWell.append(image, frameIndex);
+    imageWell.append(frameIndex);
 
     const caption = document.createElement("span");
     caption.className = "card-caption";
@@ -200,10 +346,14 @@ function appendCards(startIndex) {
     name.textContent = asset.name.replace(/\.ARW$/i, "");
     const time = document.createElement("span");
     time.className = "card-time";
-    time.textContent =
-      state.mode === "date"
-        ? captureTime(asset.capture_at)
-        : `${captureDate(asset.capture_at)} · ${formatSimilarity(asset.similarity)}`;
+    if (state.mode === "date") {
+      time.textContent = captureTime(asset.capture_at);
+    } else if (state.mode === "sequence") {
+      time.textContent =
+        `${String(index + 1).padStart(2, "0")} · ${asset.library_status.toUpperCase()}`;
+    } else {
+      time.textContent = `${captureDate(asset.capture_at)} · ${formatSimilarity(asset.similarity)}`;
+    }
     caption.append(name, time);
     card.append(imageWell, caption);
     fragment.append(card);
@@ -232,9 +382,11 @@ async function resetResults(query) {
   const url = new URL(window.location.href);
   if (query) {
     url.searchParams.set("q", query);
+    url.searchParams.delete("sequence");
     updateSemanticChrome(query);
   } else {
     url.searchParams.delete("q");
+    url.searchParams.delete("sequence");
     updateDateChrome();
   }
   window.history.replaceState({}, "", url);
@@ -259,6 +411,7 @@ function prepareResults(mode, query) {
   state.controller = new AbortController();
   state.requestSerial += 1;
   state.assets = [];
+  state.currentSequence = null;
   state.hasMore = mode === "date";
   state.loading = false;
   state.mode = mode;
@@ -270,22 +423,115 @@ function prepareResults(mode, query) {
   elements.contactStage.scrollTop = 0;
   elements.emptyState.hidden = true;
   elements.loadingState.hidden = false;
-  elements.loadingLabel.textContent =
-    mode === "semantic"
-      ? "Loading local model / searching embeddings"
-      : mode === "similar"
-        ? "Finding visual neighbors"
-        : "Reading local index";
+  const loadingLabels = {
+    date: "Reading local index",
+    semantic: "Loading local model / searching embeddings",
+    sequence: "Opening writable workspace",
+    similar: "Finding visual neighbors",
+  };
+  elements.loadingLabel.textContent = loadingLabels[mode] || "Reading local index";
   elements.paginationStatus.hidden = true;
+  elements.sequenceStatus.textContent = "";
   closeInspector(false);
   clearInspector();
   updateResultCounts();
+  renderSequences();
 }
 
 function updateSemanticChrome(query) {
   elements.dateBreadcrumb.textContent = "SEMANTIC / ALL DATES";
   elements.dateTitle.textContent = `“${query}”`;
   elements.resultModeLabel.textContent = "SigLIP2 cosine search";
+}
+
+async function openSequence(sequenceId) {
+  if (!sequenceId) {
+    return;
+  }
+  state.activeSequenceId = sequenceId;
+  prepareResults("sequence", "");
+  elements.librarySearch.value = "";
+  elements.dateBreadcrumb.textContent = "SEQUENCE / WRITABLE WORKSPACE";
+  elements.dateTitle.textContent = "Opening Sequence";
+  elements.resultModeLabel.textContent = "Local user state";
+  const url = new URL(window.location.href);
+  url.searchParams.set("sequence", sequenceId);
+  url.searchParams.delete("q");
+  window.history.replaceState({}, "", url);
+  const serial = state.requestSerial;
+  state.loading = true;
+  let failure = null;
+  try {
+    const payload = await requestJSON(
+      `/api/sequences/${encodeURIComponent(sequenceId)}`,
+      state.controller?.signal,
+    );
+    if (serial !== state.requestSerial) {
+      return;
+    }
+    displaySequence(payload.sequence);
+  } catch (error) {
+    failure = error;
+  } finally {
+    finishResultLoad(
+      serial,
+      "EMPTY SEQUENCE",
+      "Add a frame or a grounded Curator seed to begin this Sequence.",
+    );
+  }
+  if (failure && failure.name !== "AbortError") {
+    showEmpty("SEQUENCE UNAVAILABLE", failure.message);
+  }
+  updateSequenceControls();
+}
+
+function updateSequenceChrome(sequence) {
+  elements.dateBreadcrumb.textContent = `SEQUENCE / ${sequence.origin.toUpperCase()}`;
+  elements.dateTitle.textContent = sequence.name;
+  elements.resultModeLabel.textContent = sequence.note ? "Sequence note saved" : "Local user state";
+}
+
+function sequenceItemAsset(item) {
+  return {
+    ...(item.asset || {}),
+    id: item.asset?.id || null,
+    name: item.asset?.name || item.name,
+    remote_path: item.remote_path,
+    size_bytes: item.asset?.size_bytes || 0,
+    capture_at: item.asset?.capture_at || item.capture_at,
+    camera_model: item.asset?.camera_model || item.camera_model,
+    lens_model: item.asset?.lens_model || item.lens_model,
+    preview_width: item.asset?.preview_width || null,
+    preview_height: item.asset?.preview_height || null,
+    contact_url: item.asset?.contact_url || null,
+    preview_url: item.asset?.preview_url || null,
+    preview_available: item.asset?.preview_available === true,
+    library_status: item.library_status,
+    sequence_item_id: item.id,
+  };
+}
+
+function displaySequence(sequence, selectedItemId = null) {
+  state.currentSequence = sequence;
+  state.activeSequenceId = sequence.id;
+  state.assets = sequence.items.map(sequenceItemAsset);
+  state.total = sequence.item_count;
+  state.hasMore = false;
+  state.selectedIndex = -1;
+  elements.contactGrid.replaceChildren();
+  updateSequenceChrome(sequence);
+  appendCards(0);
+  if (state.assets.length > 0) {
+    const selectedIndex = selectedItemId
+      ? state.assets.findIndex((asset) => asset.sequence_item_id === selectedItemId)
+      : 0;
+    selectAsset(Math.max(selectedIndex, 0), false);
+  } else {
+    clearInspector();
+  }
+  renderSequences();
+  updateResultCounts();
+  updateSequenceControls();
 }
 
 async function loadSemanticResults() {
@@ -365,8 +611,9 @@ function finishResultLoad(serial, emptyCode, emptyMessage) {
 }
 
 function updateResultCounts() {
-  const singular = state.mode === "date" ? "frame" : "match";
-  const plural = state.mode === "date" ? "frames" : "matches";
+  const frameMode = state.mode === "date" || state.mode === "sequence";
+  const singular = frameMode ? "frame" : "match";
+  const plural = frameMode ? "frames" : "matches";
   if (state.assets.length < state.total) {
     elements.frameCount.textContent = `${state.assets.length} of ${state.total} ${plural}`;
   } else {
@@ -395,19 +642,25 @@ function selectAsset(index, openOverlay) {
   elements.inspectorEmpty.hidden = true;
   elements.inspectorContent.hidden = false;
   elements.inspectorTitle.textContent = asset.name;
-  elements.inspectorImage.src = asset.preview_url;
-  elements.inspectorImage.alt = `Cached preview of ${asset.name}`;
-  elements.previewDimensions.textContent = asset.preview_available
-    ? `${asset.preview_width} × ${asset.preview_height} cached preview`
-    : "Contact preview / medium preview evicted";
+  if (asset.preview_url) {
+    elements.inspectorImage.src = asset.preview_url;
+    elements.inspectorImage.alt = `Cached preview of ${asset.name}`;
+    elements.previewDimensions.textContent = asset.preview_available
+      ? `${asset.preview_width} × ${asset.preview_height} cached preview`
+      : "Contact preview / medium preview evicted";
+  } else {
+    elements.inspectorImage.removeAttribute("src");
+    elements.inspectorImage.alt = "";
+    elements.previewDimensions.textContent = "Archive reference missing from local contact index";
+  }
   elements.metaTaken.textContent = formatCaptureDate(asset.capture_at);
   elements.metaCamera.textContent = asset.camera_model || "Unknown";
   elements.metaLens.textContent = asset.lens_model || "Unknown";
-  elements.metaSize.textContent = formatBytes(asset.size_bytes);
+  elements.metaSize.textContent = asset.size_bytes ? formatBytes(asset.size_bytes) : "Unknown";
   elements.archivePath.textContent = asset.remote_path;
   elements.copyPathButton.textContent = "Copy archive path";
-  elements.findSimilarButton.disabled = state.embeddingCount === 0;
-  elements.curatorButton.disabled = state.embeddingCount === 0;
+  elements.findSimilarButton.disabled = state.embeddingCount === 0 || !asset.id;
+  elements.curatorButton.disabled = state.embeddingCount === 0 || !asset.id;
   clearCuratorReport();
   if (typeof asset.similarity === "number") {
     const interpretation =
@@ -420,6 +673,7 @@ function selectAsset(index, openOverlay) {
     elements.relationEvidence.hidden = true;
     elements.relationEvidence.textContent = "";
   }
+  updateSequenceControls();
   if (openOverlay && window.matchMedia("(max-width: 1040px)").matches) {
     elements.appShell.classList.add("inspector-open");
   }
@@ -437,20 +691,23 @@ function clearInspector() {
   elements.relationEvidence.hidden = true;
   elements.relationEvidence.textContent = "";
   clearCuratorReport();
+  updateSequenceControls();
 }
 
 function clearCuratorReport() {
+  state.curatorSeedAssetIds = [];
   elements.curatorReport.hidden = true;
   elements.curatorHeadline.textContent = "";
   elements.curatorObservations.replaceChildren();
   elements.curatorSequence.textContent = "";
   elements.curatorLimitations.textContent = "";
   elements.curatorButton.textContent = "Build curator evidence";
+  updateSequenceControls();
 }
 
 async function loadCurator() {
   const source = state.assets[state.selectedIndex];
-  if (!source || state.embeddingCount === 0) {
+  if (!source?.id || state.embeddingCount === 0) {
     return;
   }
   const serial = state.curatorRequestSerial + 1;
@@ -475,15 +732,19 @@ async function loadCurator() {
       elements.curatorObservations.append(item);
     }
     const sequenceCount = report.sequence_seed.items.length;
+    state.curatorSeedAssetIds = report.sequence_seed.items.map((item) => item.asset_id);
     elements.curatorSequence.textContent =
       `Sequence seed: ${sequenceCount} frames, source first then visual similarity.`;
     elements.curatorLimitations.textContent = report.limitations.join(" ");
+    updateSequenceControls();
   } catch (error) {
     if (serial !== state.curatorRequestSerial) {
       return;
     }
     elements.curatorHeadline.textContent = "Curator evidence unavailable";
     elements.curatorLimitations.textContent = error.message;
+    state.curatorSeedAssetIds = [];
+    updateSequenceControls();
   } finally {
     if (serial === state.curatorRequestSerial) {
       elements.curatorButton.disabled = state.embeddingCount === 0;
@@ -512,7 +773,7 @@ function scheduleSearch() {
 
 async function findSimilar() {
   const source = state.assets[state.selectedIndex];
-  if (!source || state.embeddingCount === 0) {
+  if (!source?.id || state.embeddingCount === 0) {
     return;
   }
   prepareResults("similar", "");
@@ -522,6 +783,7 @@ async function findSimilar() {
   elements.resultModeLabel.textContent = "SigLIP2 image cosine";
   const url = new URL(window.location.href);
   url.searchParams.delete("q");
+  url.searchParams.delete("sequence");
   window.history.replaceState({}, "", url);
   const serial = state.requestSerial;
   state.loading = true;
@@ -552,6 +814,124 @@ async function findSimilar() {
   }
   if (failure && failure.name !== "AbortError") {
     showEmpty("SIMILARITY UNAVAILABLE", failure.message);
+  }
+}
+
+function openSequenceDialog(sequence = null, { openAfterSave = false } = {}) {
+  if (!state.workspaceWritable) {
+    return;
+  }
+  state.editingSequenceId = sequence?.id || null;
+  state.openSequenceAfterSave = openAfterSave;
+  elements.sequenceDialogTitle.textContent = sequence ? "Edit Sequence" : "New Sequence";
+  elements.sequenceSubmitButton.textContent = sequence ? "Save changes" : "Create Sequence";
+  elements.sequenceNameInput.value = sequence?.name || "";
+  elements.sequenceNoteInput.value = sequence?.note || "";
+  elements.sequenceFormError.textContent = "";
+  elements.sequenceDialog.showModal();
+  elements.sequenceNameInput.focus();
+}
+
+function closeSequenceDialog() {
+  elements.sequenceDialog.close();
+  elements.sequenceFormError.textContent = "";
+}
+
+async function submitSequenceForm(event) {
+  event.preventDefault();
+  const editingId = state.editingSequenceId;
+  const payload = {
+    name: elements.sequenceNameInput.value.trim(),
+    note: elements.sequenceNoteInput.value.trim(),
+  };
+  if (!payload.name) {
+    elements.sequenceFormError.textContent = "Sequence name is required.";
+    return;
+  }
+  elements.sequenceSubmitButton.disabled = true;
+  elements.sequenceFormError.textContent = "";
+  try {
+    const response = editingId
+      ? await sendJSON(`/api/sequences/${encodeURIComponent(editingId)}`, "PATCH", payload)
+      : await sendJSON("/api/sequences", "POST", payload);
+    const sequence = response.sequence;
+    const shouldOpen =
+      state.openSequenceAfterSave ||
+      (state.mode === "sequence" && state.currentSequence?.id === sequence.id);
+    closeSequenceDialog();
+    await refreshSequences(sequence.id);
+    elements.sequenceStatus.textContent = editingId ? "Sequence details saved." : "Sequence created.";
+    if (shouldOpen) {
+      await openSequence(sequence.id);
+    }
+  } catch (error) {
+    elements.sequenceFormError.textContent = error.message;
+  } finally {
+    elements.sequenceSubmitButton.disabled = false;
+  }
+}
+
+async function addAssetsToActiveSequence(assetIds, label) {
+  const sequenceId = state.activeSequenceId;
+  if (!sequenceId || assetIds.length === 0) {
+    return;
+  }
+  elements.sequenceStatus.textContent = `${label}…`;
+  elements.addToSequenceButton.disabled = true;
+  elements.addCuratorSeedButton.disabled = true;
+  try {
+    const response = await sendJSON(
+      `/api/sequences/${encodeURIComponent(sequenceId)}/items`,
+      "POST",
+      { asset_ids: assetIds },
+    );
+    await refreshSequences(sequenceId);
+    const result = [];
+    if (response.added > 0) {
+      result.push(`${response.added} added`);
+    }
+    if (response.skipped > 0) {
+      result.push(`${response.skipped} already present`);
+    }
+    elements.sequenceStatus.textContent = result.join("; ") || "Sequence unchanged.";
+    if (state.mode === "sequence" && state.currentSequence?.id === sequenceId) {
+      displaySequence(response.sequence);
+    }
+  } catch (error) {
+    elements.sequenceStatus.textContent = error.message;
+  } finally {
+    updateSequenceControls();
+  }
+}
+
+async function moveCurrentSequenceItem(delta) {
+  if (state.mode !== "sequence" || !state.currentSequence || state.selectedIndex < 0) {
+    return;
+  }
+  const targetIndex = state.selectedIndex + delta;
+  if (targetIndex < 0 || targetIndex >= state.assets.length) {
+    return;
+  }
+  const selectedItemId = state.assets[state.selectedIndex].sequence_item_id;
+  const itemIds = state.assets.map((asset) => asset.sequence_item_id);
+  [itemIds[state.selectedIndex], itemIds[targetIndex]] = [
+    itemIds[targetIndex],
+    itemIds[state.selectedIndex],
+  ];
+  elements.sequenceStatus.textContent = "Saving Sequence order…";
+  elements.moveSequenceEarlierButton.disabled = true;
+  elements.moveSequenceLaterButton.disabled = true;
+  try {
+    const response = await sendJSON(
+      `/api/sequences/${encodeURIComponent(state.currentSequence.id)}/items/order`,
+      "PUT",
+      { item_ids: itemIds },
+    );
+    displaySequence(response.sequence, selectedItemId);
+    elements.sequenceStatus.textContent = `Moved to position ${targetIndex + 1}.`;
+  } catch (error) {
+    elements.sequenceStatus.textContent = error.message;
+    updateSequenceControls();
   }
 }
 
@@ -668,9 +1048,50 @@ elements.inspectorClose.addEventListener("click", () => closeInspector());
 elements.copyPathButton.addEventListener("click", copyArchivePath);
 elements.findSimilarButton.addEventListener("click", () => void findSimilar());
 elements.curatorButton.addEventListener("click", () => void loadCurator());
+elements.activeSequenceSelect.addEventListener("change", (event) => {
+  setActiveSequence(event.target.value);
+  elements.sequenceStatus.textContent = "Active Sequence selected.";
+});
+elements.newSequenceButton.addEventListener("click", () => {
+  openSequenceDialog(null, { openAfterSave: true });
+});
+elements.inspectorNewSequenceButton.addEventListener("click", () => {
+  openSequenceDialog();
+});
+elements.editSequenceButton.addEventListener("click", () => {
+  const active = state.sequences.find((item) => item.id === state.activeSequenceId);
+  if (active) {
+    openSequenceDialog(active);
+  }
+});
+elements.openSequenceButton.addEventListener("click", () => {
+  if (state.activeSequenceId) {
+    void openSequence(state.activeSequenceId);
+  }
+});
+elements.addToSequenceButton.addEventListener("click", () => {
+  const asset = state.assets[state.selectedIndex];
+  if (asset?.id) {
+    void addAssetsToActiveSequence([asset.id], "Adding frame");
+  }
+});
+elements.addCuratorSeedButton.addEventListener("click", () => {
+  void addAssetsToActiveSequence(state.curatorSeedAssetIds, "Adding Curator seed");
+});
+elements.moveSequenceEarlierButton.addEventListener("click", () => {
+  void moveCurrentSequenceItem(-1);
+});
+elements.moveSequenceLaterButton.addEventListener("click", () => {
+  void moveCurrentSequenceItem(1);
+});
+elements.sequenceForm.addEventListener("submit", (event) => void submitSequenceForm(event));
+elements.sequenceCancelButton.addEventListener("click", closeSequenceDialog);
 
 document.addEventListener("keydown", (event) => {
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
+  const typing =
+    event.target instanceof HTMLInputElement ||
+    event.target instanceof HTMLSelectElement ||
+    event.target instanceof HTMLTextAreaElement;
   if ((event.key === "/" || (event.metaKey && event.key.toLowerCase() === "k")) && !typing) {
     event.preventDefault();
     elements.librarySearch.focus();
