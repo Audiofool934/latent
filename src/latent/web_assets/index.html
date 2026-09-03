@@ -54,6 +54,17 @@
           <p class="sequence-empty" id="sequenceEmpty">No saved sequences</p>
         </section>
 
+        <section class="sidebar-section motif-section" aria-labelledby="motifsLabel">
+          <div class="section-heading-row">
+            <div class="section-label" id="motifsLabel">CURATOR MOTIFS</div>
+            <button class="inline-action" id="discoverMotifsButton" type="button">
+              Discover
+            </button>
+          </div>
+          <div class="motif-list" id="motifList"></div>
+          <p class="sequence-empty" id="motifEmpty">No motifs loaded</p>
+        </section>
+
         <footer class="sidebar-footer">
           <div class="local-status">
             <span class="status-dot" aria-hidden="true"></span>
@@ -77,6 +88,13 @@
           <div class="toolbar">
             <label class="mobile-date-label" for="mobileDateSelect">Date</label>
             <select id="mobileDateSelect" class="mobile-date-select"></select>
+            <button class="text-button toolbar-motif-button" id="toolbarMotifsButton" type="button">
+              Motifs
+            </button>
+            <label class="mobile-motif-label" id="mobileMotifLabel" for="mobileMotifSelect" hidden>
+              Motif
+            </label>
+            <select id="mobileMotifSelect" class="mobile-motif-select" hidden></select>
             <label class="search-field" for="librarySearch">
               <span class="search-icon" aria-hidden="true">/</span>
               <span class="visually-hidden">Search all photos by meaning</span>

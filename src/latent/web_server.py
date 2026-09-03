@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from .curator import build_grounded_curator_report
+from .curator import build_grounded_curator_report, build_grounded_motif_report
 from .errors import ConfigurationError
 from .search import (
     DEFAULT_SIGLIP2_MODEL_CACHE,
@@ -108,6 +108,8 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 self._serve_similar(int(match.group(1)), parse_qs(parsed.query))
             elif match := _CURATOR_PATH.fullmatch(parsed.path):
                 self._serve_curator(int(match.group(1)), parse_qs(parsed.query))
+            elif parsed.path == "/api/curator/motifs":
+                self._serve_curator_motifs(parse_qs(parsed.query))
             elif parsed.path == "/api/sequences":
                 self._serve_sequences()
             elif match := _SEQUENCE_PATH.fullmatch(parsed.path):
@@ -320,6 +322,97 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _serve_curator_motifs(self, query: dict[str, list[str]]) -> None:
+        cluster_count = _bounded_int(
+            _single(query, "clusters"),
+            default=12,
+            minimum=1,
+            maximum=50,
+        )
+        sequence_limit = _bounded_int(
+            _single(query, "limit"),
+            default=8,
+            minimum=1,
+            maximum=24,
+        )
+        if self.server.vector_index.size == 0:
+            raise ConfigurationError("curator index has no completed vectors")
+        clusters = self.server.vector_index.motif_clusters(cluster_count=cluster_count)
+        all_asset_ids = [asset_id for cluster in clusters for asset_id in cluster.member_asset_ids]
+        assets = self._asset_payloads_by_ids(all_asset_ids)
+        by_id = {int(asset["id"]): asset for asset in assets}
+        motifs = []
+        for cluster in clusters:
+            member_scores = dict(
+                zip(
+                    cluster.member_asset_ids,
+                    cluster.centroid_similarities,
+                    strict=True,
+                )
+            )
+            members = [
+                by_id[asset_id] for asset_id in cluster.member_asset_ids if asset_id in by_id
+            ]
+            if not members:
+                continue
+            representative_asset_id = next(
+                asset_id for asset_id in cluster.member_asset_ids if asset_id in by_id
+            )
+            available_scores = {
+                int(member["id"]): member_scores[int(member["id"])] for member in members
+            }
+            report = build_grounded_motif_report(
+                members,
+                representative_asset_id=representative_asset_id,
+                centroid_similarities=available_scores,
+                sequence_limit=sequence_limit,
+            )
+            seed_ids = [item["asset_id"] for item in report["sequence_seed"]["items"]]
+            seed_assets = []
+            for rank, asset_id in enumerate(seed_ids, start=1):
+                seed_assets.append(
+                    {
+                        **by_id[asset_id],
+                        "rank": rank,
+                        "similarity": available_scores[asset_id],
+                    }
+                )
+            motifs.append(
+                {
+                    "id": f"motif-{representative_asset_id}",
+                    "representative_asset_id": representative_asset_id,
+                    "cohesion": cluster.cohesion,
+                    "report": report,
+                    "assets": seed_assets,
+                }
+            )
+        motifs.sort(
+            key=lambda motif: (
+                not motif["report"]["cross_year"],
+                -len(motif["report"]["years"]),
+                -motif["report"]["member_count"],
+                -motif["cohesion"],
+                motif["representative_asset_id"],
+            )
+        )
+        for rank, motif in enumerate(motifs, start=1):
+            motif["rank"] = rank
+        self._send_json(
+            {
+                "mode": "grounded_motif_clusters",
+                "indexed_assets": self.server.vector_index.size,
+                "cluster_count": len(motifs),
+                "motifs": motifs,
+                "basis": {
+                    **self._relation_basis(),
+                    "algorithm": "deterministic_spherical_kmeans",
+                    "labeling": "unlabeled",
+                },
+                "cloud_access": False,
+                "archive_modified": False,
+            }
+        )
+
     def _serve_sequences(self) -> None:
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             sequences = workspace.list_sequences()
@@ -505,8 +598,10 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         return results
 
     def _asset_payloads_by_ids(self, asset_ids: list[int]) -> list[dict[str, Any]]:
+        assets = []
         with StateStore(self.server.state_dir) as store:
-            assets = store.library_assets_by_ids(asset_ids)
+            for start in range(0, len(asset_ids), 500):
+                assets.extend(store.library_assets_by_ids(asset_ids[start : start + 500]))
         return [self._asset_payload(asset) for asset in assets]
 
     def _relation_basis(self) -> dict[str, str]:

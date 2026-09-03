@@ -188,7 +188,13 @@ button {
   overflow: hidden;
 }
 
-.sequence-list {
+.motif-section {
+  max-height: 220px;
+  overflow: hidden;
+}
+
+.sequence-list,
+.motif-list {
   max-height: 144px;
   margin: 10px -8px 0;
   overflow-y: auto;
@@ -196,7 +202,8 @@ button {
   scrollbar-color: var(--line-strong) transparent;
 }
 
-.sequence-button {
+.sequence-button,
+.motif-button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -211,27 +218,42 @@ button {
   cursor: pointer;
 }
 
-.sequence-button:hover {
+.sequence-button:hover,
+.motif-button:hover {
   background: #15191a;
   color: var(--text);
 }
 
-.sequence-button[aria-current="true"] {
+.sequence-button[aria-current="true"],
+.motif-button[aria-current="true"] {
   border-left-color: var(--signal);
   background: #181d1d;
   color: var(--text);
 }
 
-.sequence-button-name {
+.sequence-button-name,
+.motif-button-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sequence-button-count,
+.motif-button-count,
 .sequence-empty {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
+}
+
+.motif-button {
+  row-gap: 3px;
+}
+
+.motif-button-meta {
+  grid-column: 1 / -1;
+  color: var(--faint);
+  font-size: 8px;
+  letter-spacing: 0.04em;
 }
 
 .sequence-empty {
@@ -351,6 +373,11 @@ button {
   gap: 8px;
 }
 
+.toolbar-motif-button {
+  min-height: 35px;
+  padding-inline: 11px;
+}
+
 .search-field {
   display: grid;
   grid-template-columns: auto minmax(100px, 180px) auto;
@@ -399,7 +426,9 @@ kbd {
 }
 
 .mobile-date-label,
-.mobile-date-select {
+.mobile-date-select,
+.mobile-motif-label,
+.mobile-motif-select {
   display: none;
 }
 
@@ -1006,7 +1035,7 @@ kbd {
 
   .toolbar {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     width: 100%;
   }
 
@@ -1027,6 +1056,31 @@ kbd {
     background: var(--panel-soft);
     color: var(--text);
     font-size: 9px;
+  }
+
+  .mobile-motif-label {
+    display: block;
+    align-self: center;
+    color: var(--faint);
+    font-size: 9px;
+  }
+
+  .mobile-motif-select {
+    display: block;
+    grid-column: 2 / -1;
+    width: 100%;
+    min-height: 35px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel-soft);
+    color: var(--text);
+    font-size: 9px;
+  }
+
+  .mobile-motif-label[hidden],
+  .mobile-motif-select[hidden] {
+    display: none;
   }
 
   .search-field {

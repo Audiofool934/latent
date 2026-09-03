@@ -12,8 +12,8 @@ Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内�
 高容量日期按 250 张一批增量加载，不受单页上限影响。
 本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索模型。
 跨日期语义搜索、相似照片 API 和对应界面已经在 3 张真实 contact preview 的隔离向量库上跑通。
-第一版 grounded Curator 已能把相似度、拍摄日期和一致的 EXIF 汇成可追溯观察与 Sequence seed，不生成地点、身份或故事。
-独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改、网页交互和非覆盖式导入导出契约。
+Grounded Curator 已能解释单图视觉邻域，并生成无标签的全库视觉 motif、跨年份证据和 Sequence seed，不生成地点、身份或故事。
+独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改、服务重启恢复、网页交互和非覆盖式导入导出契约。
 正式图库仍保持 25,793 个 pending、0 个 vector，全库索引等待资源预算确认。
 
 ## Phase 0 spike
@@ -203,15 +203,15 @@ MVP 包含：
 
 ### Phase 1: Library and discovery MVP
 
-完成真实档案索引、contact sheet、inspector、SigLIP2 embedding、跨日期语义搜索、相似照片、受约束 Curator、Sequence 和 DxO handoff。
+完成真实档案索引、contact sheet、inspector、SigLIP2 embedding、跨日期语义搜索、相似照片、受约束 Curator 和 Sequence。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
 日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
-embedding queue、语义搜索、相似照片、grounded Curator 和 Sequence 链路已经完成有界验证，全库向量构建仍等待资源确认。
+embedding queue、语义搜索、相似照片、grounded Curator、跨年份 motif 和 Sequence 链路已经完成有界验证，全库向量构建仍等待资源确认。
 
 ### Phase 2: Curator expansion
 
-在第一版有依据的关系解释之上，加入主题聚类、跨年份母题、可比较的策展方向和更完整的 Sequence 建议。
+在第一版无标签视觉 motif 之上，加入可比较的策展方向、Curator 状态保存和更完整的派生建议。
 
 ### Phase 3: Derivatives
 

@@ -375,6 +375,23 @@ def test_semantic_and_visual_similarity_apis_return_ranked_local_assets(
         assert "does not establish place" in curator["report"]["limitations"][1]
         assert curator["cloud_access"] is False
 
+        motifs, _ = _get_json(f"{base_url}/api/curator/motifs?clusters=1&limit=3")
+        assert motifs["mode"] == "grounded_motif_clusters"
+        assert motifs["indexed_assets"] == 3
+        assert motifs["cluster_count"] == 1
+        assert motifs["basis"]["algorithm"] == "deterministic_spherical_kmeans"
+        assert motifs["basis"]["labeling"] == "unlabeled"
+        assert motifs["archive_modified"] is False
+        motif = motifs["motifs"][0]
+        assert motif["representative_asset_id"] == 3
+        assert motif["report"]["member_count"] == 3
+        assert motif["report"]["cross_year"] is True
+        assert motif["report"]["years"] == ["2025", "2026"]
+        assert [asset["id"] for asset in motif["assets"]] == [3, 1, 2]
+        assert motif["report"]["limitations"][-1] == (
+            "It does not establish place, identity, event, intention, or story."
+        )
+
         with pytest.raises(HTTPError) as missing_embedding:
             urlopen(f"{base_url}/api/assets/999/similar", timeout=2)
         assert missing_embedding.value.code == 404
@@ -399,6 +416,10 @@ def test_semantic_apis_fail_closed_until_vectors_exist(tmp_path: Path) -> None:
         with pytest.raises(HTTPError) as unavailable_curator:
             urlopen(f"{base_url}/api/assets/1/curator", timeout=2)
         assert unavailable_curator.value.code == 503
+
+        with pytest.raises(HTTPError) as unavailable_motifs:
+            urlopen(f"{base_url}/api/curator/motifs", timeout=2)
+        assert unavailable_motifs.value.code == 503
 
 
 def test_sequence_api_persists_stable_archive_references_and_order(tmp_path: Path) -> None:
@@ -462,6 +483,48 @@ def test_sequence_api_persists_stable_archive_references_and_order(tmp_path: Pat
 
     with WorkspaceStore(tmp_path / "workspace") as workspace:
         assert workspace.status()["sequences"] == 0
+
+
+def test_sequence_api_survives_a_service_restart(tmp_path: Path) -> None:
+    _seed_pageable_library(
+        tmp_path,
+        capture_dates=("2024-02-03", "2025-07-08", "2026-08-29"),
+    )
+
+    with _running_server(tmp_path) as base_url:
+        created, status = _request_json(
+            f"{base_url}/api/sequences",
+            method="POST",
+            payload={"name": "Cross-year light", "note": "Restart evidence"},
+        )
+        assert status == 201
+        sequence_id = created["sequence"]["id"]
+        added, _ = _request_json(
+            f"{base_url}/api/sequences/{sequence_id}/items",
+            method="POST",
+            payload={"asset_ids": [3, 1, 2]},
+        )
+        expected_item_ids = [item["id"] for item in added["sequence"]["items"]]
+        assert [item["capture_at"][:10] for item in added["sequence"]["items"]] == [
+            "2026:08:29",
+            "2024:02:03",
+            "2025:07:08",
+        ]
+
+    assert (tmp_path / "workspace/workspace.sqlite").is_file()
+
+    with _running_server(tmp_path) as restarted_url:
+        listing, _ = _get_json(f"{restarted_url}/api/sequences")
+        assert [(sequence["id"], sequence["item_count"]) for sequence in listing["sequences"]] == [
+            (sequence_id, 3)
+        ]
+
+        persisted, _ = _get_json(f"{restarted_url}/api/sequences/{sequence_id}")
+        assert persisted["sequence"]["name"] == "Cross-year light"
+        assert persisted["sequence"]["note"] == "Restart evidence"
+        assert [item["id"] for item in persisted["sequence"]["items"]] == expected_item_ids
+        assert all(item["library_status"] == "current" for item in persisted["sequence"]["items"])
+        assert persisted["archive_modified"] is False
 
 
 def test_sequence_api_rejects_non_json_and_missing_assets(tmp_path: Path) -> None:

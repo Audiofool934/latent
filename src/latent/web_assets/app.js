@@ -19,11 +19,13 @@ const elements = {
   dateBreadcrumb: document.querySelector("#dateBreadcrumb"),
   dateList: document.querySelector("#dateList"),
   dateTitle: document.querySelector("#dateTitle"),
+  discoverMotifsButton: document.querySelector("#discoverMotifsButton"),
   embeddingReadyCount: document.querySelector("#embeddingReadyCount"),
   editSequenceButton: document.querySelector("#editSequenceButton"),
   emptyState: document.querySelector("#emptyState"),
   findSimilarButton: document.querySelector("#findSimilarButton"),
   frameCount: document.querySelector("#frameCount"),
+  inspector: document.querySelector("#inspector"),
   inspectorClose: document.querySelector("#inspectorClose"),
   inspectorContent: document.querySelector("#inspectorContent"),
   inspectorEmpty: document.querySelector("#inspectorEmpty"),
@@ -41,6 +43,10 @@ const elements = {
   mobileDateSelect: document.querySelector("#mobileDateSelect"),
   moveSequenceEarlierButton: document.querySelector("#moveSequenceEarlierButton"),
   moveSequenceLaterButton: document.querySelector("#moveSequenceLaterButton"),
+  motifEmpty: document.querySelector("#motifEmpty"),
+  motifList: document.querySelector("#motifList"),
+  mobileMotifLabel: document.querySelector("#mobileMotifLabel"),
+  mobileMotifSelect: document.querySelector("#mobileMotifSelect"),
   newSequenceButton: document.querySelector("#newSequenceButton"),
   openSequenceButton: document.querySelector("#openSequenceButton"),
   paginationProgress: document.querySelector("#paginationProgress"),
@@ -62,9 +68,11 @@ const elements = {
   sequenceOrderControls: document.querySelector("#sequenceOrderControls"),
   sequenceStatus: document.querySelector("#sequenceStatus"),
   sequenceSubmitButton: document.querySelector("#sequenceSubmitButton"),
+  toolbarMotifsButton: document.querySelector("#toolbarMotifsButton"),
 };
 
 const state = {
+  activeMotifId: null,
   assets: [],
   activeSequenceId: null,
   controller: null,
@@ -78,6 +86,8 @@ const state = {
   editingSequenceId: null,
   loading: false,
   mode: "date",
+  motifBasis: null,
+  motifs: [],
   openSequenceAfterSave: false,
   query: "",
   relationBasis: null,
@@ -131,7 +141,12 @@ async function boot() {
     state.embeddingCount = library.embedding_index?.indexed_assets || 0;
     state.workspaceWritable = library.workspace?.writable === true;
     elements.embeddingReadyCount.textContent = String(state.embeddingCount);
+    elements.discoverMotifsButton.disabled = state.embeddingCount === 0;
+    elements.toolbarMotifsButton.disabled = state.embeddingCount === 0;
+    elements.motifEmpty.textContent =
+      state.embeddingCount === 0 ? "Embedding index required" : "No motifs loaded";
     renderDates();
+    renderMotifs();
     try {
       await refreshSequences();
     } catch {
@@ -143,6 +158,7 @@ async function boot() {
     setupPaginationObserver();
     const parameters = new URLSearchParams(window.location.search);
     const requested = parameters.get("date");
+    const requestedMotif = parameters.get("motif");
     const requestedSequence = parameters.get("sequence");
     const requestedQuery = (parameters.get("q") || "").trim();
     const initialDate = state.dates.some((item) => item.capture_date === requested)
@@ -152,7 +168,12 @@ async function boot() {
       state.currentDate = initialDate;
       elements.librarySearch.value = requestedQuery;
       updateDateChrome();
-      if (requestedSequence && state.sequences.some((item) => item.id === requestedSequence)) {
+      if (requestedMotif && state.embeddingCount > 0) {
+        await loadMotifs(requestedMotif);
+      } else if (
+        requestedSequence &&
+        state.sequences.some((item) => item.id === requestedSequence)
+      ) {
         await openSequence(requestedSequence);
       } else {
         await resetResults(requestedQuery);
@@ -242,6 +263,47 @@ function renderSequences() {
   elements.activeSequenceSelect.value = state.activeSequenceId || "";
 }
 
+function renderMotifs() {
+  elements.motifList.replaceChildren();
+  elements.mobileMotifSelect.replaceChildren();
+  elements.motifEmpty.hidden = state.motifs.length > 0;
+  elements.mobileMotifLabel.hidden = state.motifs.length === 0;
+  elements.mobileMotifSelect.hidden = state.motifs.length === 0;
+  for (const motif of state.motifs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "motif-button";
+    button.dataset.motifId = motif.id;
+    button.setAttribute(
+      "aria-current",
+      state.mode === "motif" && state.activeMotifId === motif.id ? "true" : "false",
+    );
+    button.addEventListener("click", () => openMotif(motif.id));
+
+    const name = document.createElement("span");
+    name.className = "motif-button-name";
+    name.textContent = `Motif ${String(motif.rank).padStart(2, "0")}`;
+    const count = document.createElement("span");
+    count.className = "motif-button-count";
+    count.textContent = String(motif.report.member_count);
+    const metadata = document.createElement("span");
+    metadata.className = "motif-button-meta";
+    metadata.textContent = motif.report.cross_year
+      ? `${motif.report.years.length} recorded years`
+      : motif.report.years[0] || "No recorded year";
+    button.append(name, count, metadata);
+    elements.motifList.append(button);
+
+    const option = document.createElement("option");
+    option.value = motif.id;
+    option.textContent =
+      `Motif ${String(motif.rank).padStart(2, "0")} / ` +
+      `${motif.report.member_count} frames / ${metadata.textContent}`;
+    elements.mobileMotifSelect.append(option);
+  }
+  elements.mobileMotifSelect.value = state.activeMotifId || state.motifs[0]?.id || "";
+}
+
 function setActiveSequence(sequenceId) {
   state.activeSequenceId = state.sequences.some((item) => item.id === sequenceId)
     ? sequenceId
@@ -278,6 +340,7 @@ async function loadDate(captureDate) {
   updateDateChrome();
   const url = new URL(window.location.href);
   url.searchParams.set("date", captureDate);
+  url.searchParams.delete("motif");
   url.searchParams.delete("q");
   url.searchParams.delete("sequence");
   window.history.replaceState({}, "", url);
@@ -308,7 +371,7 @@ function appendCards(startIndex) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "photo-card";
-    if (state.mode === "semantic" || state.mode === "similar") {
+    if (state.mode === "semantic" || state.mode === "similar" || state.mode === "motif") {
       card.classList.add("ranked-card");
     } else if (state.mode === "sequence") {
       card.classList.add("sequence-card");
@@ -382,9 +445,11 @@ async function resetResults(query) {
   const url = new URL(window.location.href);
   if (query) {
     url.searchParams.set("q", query);
+    url.searchParams.delete("motif");
     url.searchParams.delete("sequence");
     updateSemanticChrome(query);
   } else {
+    url.searchParams.delete("motif");
     url.searchParams.delete("q");
     url.searchParams.delete("sequence");
     updateDateChrome();
@@ -415,6 +480,9 @@ function prepareResults(mode, query) {
   state.hasMore = mode === "date";
   state.loading = false;
   state.mode = mode;
+  if (mode !== "motif") {
+    state.activeMotifId = null;
+  }
   state.query = query;
   state.relationBasis = null;
   state.selectedIndex = -1;
@@ -428,6 +496,7 @@ function prepareResults(mode, query) {
     semantic: "Loading local model / searching embeddings",
     sequence: "Opening writable workspace",
     similar: "Finding visual neighbors",
+    motif: "Clustering local embeddings",
   };
   elements.loadingLabel.textContent = loadingLabels[mode] || "Reading local index";
   elements.paginationStatus.hidden = true;
@@ -436,6 +505,7 @@ function prepareResults(mode, query) {
   clearInspector();
   updateResultCounts();
   renderSequences();
+  renderMotifs();
 }
 
 function updateSemanticChrome(query) {
@@ -456,6 +526,7 @@ async function openSequence(sequenceId) {
   elements.resultModeLabel.textContent = "Local user state";
   const url = new URL(window.location.href);
   url.searchParams.set("sequence", sequenceId);
+  url.searchParams.delete("motif");
   url.searchParams.delete("q");
   window.history.replaceState({}, "", url);
   const serial = state.requestSerial;
@@ -532,6 +603,85 @@ function displaySequence(sequence, selectedItemId = null) {
   renderSequences();
   updateResultCounts();
   updateSequenceControls();
+}
+
+async function loadMotifs(preferredId = null) {
+  if (state.embeddingCount === 0) {
+    return;
+  }
+  state.controller?.abort();
+  state.controller = new AbortController();
+  state.requestSerial += 1;
+  const serial = state.requestSerial;
+  elements.discoverMotifsButton.disabled = true;
+  elements.discoverMotifsButton.textContent = "Reading";
+  elements.toolbarMotifsButton.disabled = true;
+  elements.toolbarMotifsButton.textContent = "Reading";
+  try {
+    const payload = await requestJSON(
+      "/api/curator/motifs?clusters=12&limit=8",
+      state.controller.signal,
+    );
+    if (serial !== state.requestSerial) {
+      return;
+    }
+    state.motifs = payload.motifs;
+    state.motifBasis = payload.basis;
+    elements.motifEmpty.textContent = "No motif clusters available";
+    renderMotifs();
+    const selected = state.motifs.some((motif) => motif.id === preferredId)
+      ? preferredId
+      : state.motifs[0]?.id;
+    if (selected) {
+      openMotif(selected);
+    } else {
+      showEmpty("NO CURATOR MOTIFS", "The current local vector index produced no clusters.");
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      return;
+    }
+    elements.motifEmpty.textContent = error.message;
+    showEmpty("CURATOR MOTIFS UNAVAILABLE", error.message);
+  } finally {
+    elements.discoverMotifsButton.disabled = state.embeddingCount === 0;
+    elements.discoverMotifsButton.textContent = "Discover";
+    elements.toolbarMotifsButton.disabled = state.embeddingCount === 0;
+    elements.toolbarMotifsButton.textContent = "Motifs";
+  }
+}
+
+function openMotif(motifId) {
+  const motif = state.motifs.find((candidate) => candidate.id === motifId);
+  if (!motif) {
+    return;
+  }
+  prepareResults("motif", "");
+  state.activeMotifId = motif.id;
+  state.relationBasis = state.motifBasis;
+  state.assets = motif.assets;
+  state.total = motif.assets.length;
+  state.hasMore = false;
+  elements.librarySearch.value = "";
+  elements.dateBreadcrumb.textContent = "CURATOR / ALL INDEXED YEARS";
+  elements.dateTitle.textContent = `Motif ${String(motif.rank).padStart(2, "0")}`;
+  const yearLabel = motif.report.cross_year
+    ? `${motif.report.years.length} recorded years`
+    : motif.report.years[0] || "no recorded year";
+  elements.resultModeLabel.textContent =
+    `${motif.report.member_count} clustered frames / ${yearLabel}`;
+  const url = new URL(window.location.href);
+  url.searchParams.set("motif", motif.id);
+  url.searchParams.delete("q");
+  url.searchParams.delete("sequence");
+  window.history.replaceState({}, "", url);
+  elements.loadingState.hidden = true;
+  appendCards(0);
+  if (state.assets.length > 0) {
+    selectAsset(0, false);
+  }
+  updateResultCounts();
+  renderMotifs();
 }
 
 async function loadSemanticResults() {
@@ -611,7 +761,8 @@ function finishResultLoad(serial, emptyCode, emptyMessage) {
 }
 
 function updateResultCounts() {
-  const frameMode = state.mode === "date" || state.mode === "sequence";
+  const frameMode =
+    state.mode === "date" || state.mode === "sequence" || state.mode === "motif";
   const singular = frameMode ? "frame" : "match";
   const plural = frameMode ? "frames" : "matches";
   if (state.assets.length < state.total) {
@@ -639,6 +790,7 @@ function selectAsset(index, openOverlay) {
     card.setAttribute("aria-selected", cardIndex === index ? "true" : "false");
   });
   const asset = state.assets[index];
+  elements.inspector.scrollTop = 0;
   elements.inspectorEmpty.hidden = true;
   elements.inspectorContent.hidden = false;
   elements.inspectorTitle.textContent = asset.name;
@@ -666,12 +818,19 @@ function selectAsset(index, openOverlay) {
     const interpretation =
       state.relationBasis?.interpretation ||
       "Similarity is model evidence, not proof of place, identity, or story.";
+    const relationLabel = state.mode === "motif" ? "Cosine to motif centroid" : "Cosine";
     elements.relationEvidence.textContent =
-      `Cosine ${asset.similarity.toFixed(3)}. ${interpretation}`;
+      `${relationLabel} ${asset.similarity.toFixed(3)}. ${interpretation}`;
     elements.relationEvidence.hidden = false;
   } else {
     elements.relationEvidence.hidden = true;
     elements.relationEvidence.textContent = "";
+  }
+  if (state.mode === "motif") {
+    const motif = state.motifs.find((candidate) => candidate.id === state.activeMotifId);
+    if (motif) {
+      renderCuratorEvidence(motif.report);
+    }
   }
   updateSequenceControls();
   if (openOverlay && window.matchMedia("(max-width: 1040px)").matches) {
@@ -705,6 +864,23 @@ function clearCuratorReport() {
   updateSequenceControls();
 }
 
+function renderCuratorEvidence(report) {
+  elements.curatorReport.hidden = false;
+  elements.curatorHeadline.textContent = report.headline;
+  elements.curatorObservations.replaceChildren();
+  for (const observation of report.observations) {
+    const item = document.createElement("li");
+    item.textContent = observation.statement;
+    elements.curatorObservations.append(item);
+  }
+  const sequenceCount = report.sequence_seed.items.length;
+  state.curatorSeedAssetIds = report.sequence_seed.items.map((item) => item.asset_id);
+  elements.curatorSequence.textContent =
+    `Sequence seed: ${sequenceCount} frames. ${report.sequence_seed.description}`;
+  elements.curatorLimitations.textContent = report.limitations.join(" ");
+  updateSequenceControls();
+}
+
 async function loadCurator() {
   const source = state.assets[state.selectedIndex];
   if (!source?.id || state.embeddingCount === 0) {
@@ -724,19 +900,7 @@ async function loadCurator() {
     if (serial !== state.curatorRequestSerial) {
       return;
     }
-    const report = payload.report;
-    elements.curatorHeadline.textContent = report.headline;
-    for (const observation of report.observations) {
-      const item = document.createElement("li");
-      item.textContent = observation.statement;
-      elements.curatorObservations.append(item);
-    }
-    const sequenceCount = report.sequence_seed.items.length;
-    state.curatorSeedAssetIds = report.sequence_seed.items.map((item) => item.asset_id);
-    elements.curatorSequence.textContent =
-      `Sequence seed: ${sequenceCount} frames, source first then visual similarity.`;
-    elements.curatorLimitations.textContent = report.limitations.join(" ");
-    updateSequenceControls();
+    renderCuratorEvidence(payload.report);
   } catch (error) {
     if (serial !== state.curatorRequestSerial) {
       return;
@@ -782,6 +946,7 @@ async function findSimilar() {
   elements.dateTitle.textContent = "Visual Neighbors";
   elements.resultModeLabel.textContent = "SigLIP2 image cosine";
   const url = new URL(window.location.href);
+  url.searchParams.delete("motif");
   url.searchParams.delete("q");
   url.searchParams.delete("sequence");
   window.history.replaceState({}, "", url);
@@ -1048,6 +1213,11 @@ elements.inspectorClose.addEventListener("click", () => closeInspector());
 elements.copyPathButton.addEventListener("click", copyArchivePath);
 elements.findSimilarButton.addEventListener("click", () => void findSimilar());
 elements.curatorButton.addEventListener("click", () => void loadCurator());
+elements.discoverMotifsButton.addEventListener("click", () => void loadMotifs());
+elements.toolbarMotifsButton.addEventListener("click", () => void loadMotifs());
+elements.mobileMotifSelect.addEventListener("change", (event) => {
+  openMotif(event.target.value);
+});
 elements.activeSequenceSelect.addEventListener("change", (event) => {
   setActiveSequence(event.target.value);
   elements.sequenceStatus.textContent = "Active Sequence selected.";

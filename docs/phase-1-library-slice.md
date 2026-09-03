@@ -184,6 +184,30 @@ HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 
 
 服务对客户端取消语义请求后的 `BrokenPipeError` 做静默终止，避免搜索切换污染长期运行日志。
 
+## Global visual motif evidence
+
+Curator 现在也能对当前全部有效图像向量执行确定性的 spherical k-means。
+输出保持无标签，不把聚类自动命名成地点、人物、事件或艺术主题。
+每个 motif 都公开 member count、centroid representative、平均 centroid cosine、拍摄日期与年份跨度、重复 camera/lens 事实和 limitations。
+跨年份 Sequence seed 先放 centroid representative，再优先选择其他年份中最接近 centroid 的照片，最后按 centroid cosine 补齐。
+
+25,793 个 768 维合成 float16 向量的同规模压测得到以下结果：
+
+- 12 个 cluster 覆盖全部 25,793 个 member
+- 首次加载向量并完成 6 轮上限聚类耗时 0.462 秒
+- 同一 revision 的缓存请求耗时 0.063 秒
+- 进程 RSS 从 84.4 MiB 增加到 266.9 MiB，增量 182.5 MiB
+- 向量数据为 39,618,048 bytes，与 25,793 × 768 × 2 一致
+
+这个压测只证明当前 O(n × k × d) 实现对目标规模的运行时间和内存是有界的。
+合成向量不能证明真实摄影档案的聚类质量，真实 motif 仍要等全库 SigLIP2 embedding 完成后验收。
+
+真实网页手势验收使用 24 个隔离向量和正式 Library 的本地 contact preview。
+它在 `1440x900` 显示可切换 motif、跨年份证据和可加入 Sequence 的 seed，在 `390x844` 使用原生 motif selector 切换 12 个候选。
+从 motif 创建 `Cross-year motif study`、加入 2 张跨年 seed、重复加入去重、重启服务和重新载入 motif URL 后，Sequence 名称、备注和 2 张顺序都保持不变。
+Inspector 在手机上重新打开时回到顶部，并能滚动到完整证据和限制语。
+两个视口都没有横向溢出，浏览器控制台没有 warning 或 error。
+
 ## Semantic runtime warmup evidence
 
 项目 venv 首次安装 embedding group 后，受控的 `transformers 5.16.1` 导入耗时 86.98 秒。
@@ -211,4 +235,4 @@ HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 
 ## Next step
 
 下一步是在资源预算确认后构建全库 embedding，并用完整向量覆盖验证搜索、Curator 与 Sequence 工作流的实际质量和性能。
-DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。
+DxO handoff 属于当前 Goal 之外的后续工作。

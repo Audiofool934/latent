@@ -109,6 +109,53 @@ def test_vector_index_refreshes_after_an_asset_id_remap(tmp_path: Path) -> None:
     assert [match.asset_id for match in refreshed] == [30, 1, 2]
 
 
+def test_vector_index_builds_deterministic_spherical_motif_clusters(tmp_path: Path) -> None:
+    embedding_dir = tmp_path / "embeddings"
+    vectors = {
+        1: [1.0, 0.0, 0.0, 0.0],
+        2: [0.98, 0.10, 0.0, 0.0],
+        3: [0.96, -0.08, 0.0, 0.0],
+        4: [0.99, 0.03, 0.0, 0.0],
+        5: [0.0, 1.0, 0.0, 0.0],
+        6: [0.10, 0.98, 0.0, 0.0],
+        7: [-0.08, 0.96, 0.0, 0.0],
+        8: [0.03, 0.99, 0.0, 0.0],
+    }
+    with EmbeddingStore(embedding_dir, dimensions=4) as store:
+        store.sync_assets([_asset(asset_id) for asset_id in vectors])
+        jobs = store.claim_jobs(len(vectors))
+        store.finish_jobs(
+            [(job, serialize_float16_vector(vectors[job.asset_id], 4)) for job in jobs]
+        )
+
+    index = VectorIndex(embedding_dir, dimensions=4)
+    first = index.motif_clusters(cluster_count=2)
+    second = index.motif_clusters(cluster_count=2)
+
+    assert first == second
+    assert len(first) == 2
+    assert {frozenset(cluster.member_asset_ids) for cluster in first} == {
+        frozenset({1, 2, 3, 4}),
+        frozenset({5, 6, 7, 8}),
+    }
+    assert all(cluster.cohesion > 0.99 for cluster in first)
+    assert all(
+        list(cluster.centroid_similarities) == sorted(cluster.centroid_similarities, reverse=True)
+        for cluster in first
+    )
+
+    with EmbeddingStore(embedding_dir, dimensions=4) as store:
+        added = store.sync_assets([_asset(asset_id) for asset_id in (*vectors, 9)])
+        assert added.enqueued == 1
+        job = store.claim_jobs(1)[0]
+        assert job.asset_id == 9
+        store.finish_jobs([(job, serialize_float16_vector([0.97, 0.04, 0.0, 0.0], 4))])
+
+    refreshed = index.motif_clusters(cluster_count=2)
+    assert sum(len(cluster.member_asset_ids) for cluster in refreshed) == 9
+    assert any(9 in cluster.member_asset_ids for cluster in refreshed)
+
+
 def test_semantic_search_encodes_one_normalized_query(tmp_path: Path) -> None:
     embedding_dir = tmp_path / "embeddings"
     _seed_vectors(embedding_dir)

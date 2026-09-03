@@ -33,6 +33,17 @@ class VectorMatch:
         return {"asset_id": self.asset_id, "rank": self.rank, "score": self.score}
 
 
+@dataclass(frozen=True)
+class VisualMotifCluster:
+    member_asset_ids: tuple[int, ...]
+    centroid_similarities: tuple[float, ...]
+    cohesion: float
+
+    @property
+    def representative_asset_id(self) -> int:
+        return self.member_asset_ids[0]
+
+
 class TextEmbeddingEncoder(Protocol):
     model_id: str
 
@@ -57,6 +68,10 @@ class VectorIndex:
         self._asset_ids = np.empty((0,), dtype=np.int64)
         self._matrix = np.empty((0, dimensions), dtype=np.float32)
         self._asset_positions: dict[int, int] = {}
+        self._motif_cache: dict[
+            tuple[tuple[int, str, str, int, int], int, int],
+            tuple[VisualMotifCluster, ...],
+        ] = {}
 
     @property
     def size(self) -> int:
@@ -111,6 +126,7 @@ class VectorIndex:
                 int(asset_id): position for position, asset_id in enumerate(asset_ids.tolist())
             }
             self._revision = revision
+            self._motif_cache.clear()
         return True
 
     def search_vector(
@@ -170,6 +186,78 @@ class VectorIndex:
                 raise KeyError(f"asset {asset_id} does not have a current embedding")
             vector = self._matrix[position].copy()
         return self.search_vector(vector, limit=limit, exclude_asset_ids=(asset_id,))
+
+    def motif_clusters(
+        self,
+        *,
+        cluster_count: int = 12,
+        iterations: int = 6,
+    ) -> list[VisualMotifCluster]:
+        """Build deterministic spherical clusters over current local image vectors."""
+        if cluster_count < 1 or cluster_count > 50:
+            raise ValueError("motif cluster count must be between 1 and 50")
+        if iterations < 1 or iterations > 20:
+            raise ValueError("motif iterations must be between 1 and 20")
+        self.refresh()
+        with self._lock:
+            if self._asset_ids.size == 0 or self._revision is None:
+                return []
+            effective_count = min(cluster_count, int(self._asset_ids.size))
+            cache_key = (self._revision, effective_count, iterations)
+            cached = self._motif_cache.get(cache_key)
+            if cached is not None:
+                return list(cached)
+            asset_ids = self._asset_ids
+            matrix = self._matrix
+
+        centers = _initial_motif_centers(matrix, effective_count)
+        assignments: np.ndarray | None = None
+        for _iteration in range(iterations):
+            next_assignments = np.argmax(matrix @ centers.T, axis=1)
+            if assignments is not None and np.array_equal(next_assignments, assignments):
+                break
+            assignments = next_assignments
+            for cluster_index in range(effective_count):
+                members = matrix[assignments == cluster_index]
+                if members.size == 0:
+                    continue
+                center = members.mean(axis=0)
+                norm = float(np.linalg.vector_norm(center))
+                if norm > 0:
+                    centers[cluster_index] = center / norm
+
+        scores = matrix @ centers.T
+        assignments = np.argmax(scores, axis=1)
+        clusters = []
+        for cluster_index in range(effective_count):
+            positions = np.flatnonzero(assignments == cluster_index)
+            if positions.size == 0:
+                continue
+            similarities = scores[positions, cluster_index]
+            order = np.lexsort((asset_ids[positions], -similarities))
+            ordered_positions = positions[order]
+            ordered_scores = similarities[order]
+            clusters.append(
+                VisualMotifCluster(
+                    member_asset_ids=tuple(int(value) for value in asset_ids[ordered_positions]),
+                    centroid_similarities=tuple(
+                        max(-1.0, min(1.0, float(value))) for value in ordered_scores
+                    ),
+                    cohesion=max(-1.0, min(1.0, float(np.mean(ordered_scores)))),
+                )
+            )
+        clusters.sort(
+            key=lambda cluster: (
+                -len(cluster.member_asset_ids),
+                -cluster.cohesion,
+                cluster.representative_asset_id,
+            )
+        )
+        result = tuple(clusters)
+        with self._lock:
+            if self._revision == cache_key[0]:
+                self._motif_cache[cache_key] = result
+        return list(result)
 
 
 class SemanticSearch:
@@ -245,3 +333,15 @@ class LazySigLIP2TextEncoder:
                         f"local SigLIP2 model could not be loaded: {error}"
                     ) from error
         return self._encoder
+
+
+def _initial_motif_centers(matrix: np.ndarray, count: int) -> np.ndarray:
+    mean = matrix.mean(axis=0)
+    norm = float(np.linalg.vector_norm(mean))
+    first = 0 if norm <= 0 else int(np.argmax(matrix @ (mean / norm)))
+    selected = [first]
+    while len(selected) < count:
+        nearest_similarity = np.max(matrix @ matrix[selected].T, axis=1)
+        nearest_similarity[np.asarray(selected, dtype=np.int64)] = np.inf
+        selected.append(int(np.argmin(nearest_similarity)))
+    return matrix[np.asarray(selected, dtype=np.int64)].copy()

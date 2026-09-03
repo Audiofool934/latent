@@ -76,6 +76,8 @@ Loopback 服务已经提供 Sequence list、detail、create、update、add items
 - 再次加入相同 seed 时返回 3 already present，item count 保持 5
 - 在 `390x844` 显示 5 张两列 Sequence contact sheet，并从 inspector 使用顺序控制
 - 刷新带 `sequence` 参数的 URL 后仍恢复同一 Sequence、5 张顺序和 active selector
+- 关闭服务并从同一个 workspace 启动全新服务实例后，跨 2024、2025、2026 的 3 张测试 Sequence 仍保留名称、备注、顺序和 current Library 状态
+- 从全局视觉 motif 创建跨年 Sequence、加入 seed、重复加入去重并再次重启服务后，2 张真实 Library 引用仍保持不变
 
 桌面和手机状态都没有页面横向溢出，浏览器控制台没有 warning 或 error。
 验收使用隔离的临时 workspace，没有写入用户的正式 workspace。

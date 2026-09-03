@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -130,6 +131,175 @@ def build_grounded_curator_report(
             "It does not establish place, identity, event, intention, or story.",
         ],
     }
+
+
+def build_grounded_motif_report(
+    members: Sequence[Mapping[str, Any]],
+    *,
+    representative_asset_id: int,
+    centroid_similarities: Mapping[int, float],
+    sequence_limit: int = 8,
+) -> dict[str, Any]:
+    """Describe an unlabeled visual cluster using only vectors and recorded metadata."""
+    if sequence_limit < 1 or sequence_limit > 100:
+        raise ValueError("sequence limit must be between 1 and 100")
+    source = list(members)
+    if not source:
+        raise ValueError("a motif report requires at least one member")
+    by_id = {_asset_id(member): member for member in source}
+    if len(by_id) != len(source):
+        raise ValueError("motif member asset IDs must be unique")
+    if representative_asset_id not in by_id:
+        raise ValueError("motif representative must be one of its members")
+    if set(centroid_similarities) != set(by_id):
+        raise ValueError("motif centroid similarities must cover every member")
+    raw_scores = {asset_id: float(score) for asset_id, score in centroid_similarities.items()}
+    if not all(
+        math.isfinite(score) and -1.0001 <= score <= 1.0001 for score in raw_scores.values()
+    ):
+        raise ValueError("motif centroid similarities must be between -1 and 1")
+    scores = {asset_id: max(-1.0, min(1.0, score)) for asset_id, score in raw_scores.items()}
+
+    ranked_ids = sorted(by_id, key=lambda asset_id: (-scores[asset_id], asset_id))
+    capture_dates = sorted(
+        {
+            capture_date
+            for member in source
+            if (capture_date := _capture_date(member.get("capture_at"))) is not None
+        }
+    )
+    years = sorted({capture_date[:4] for capture_date in capture_dates})
+    observations = [
+        {
+            "kind": "visual_cluster",
+            "statement": (
+                f"{len(source)} indexed frames share a spherical embedding cluster; "
+                f"mean cosine to its centroid is {sum(scores.values()) / len(scores):.3f}."
+            ),
+            "asset_ids": ranked_ids,
+            "facts": {
+                "algorithm": "deterministic_spherical_kmeans",
+                "metric": "cosine_similarity_to_centroid",
+                "member_count": len(source),
+                "representative_asset_id": representative_asset_id,
+                "mean_centroid_similarity": sum(scores.values()) / len(scores),
+            },
+        }
+    ]
+    if capture_dates:
+        observations.append(
+            {
+                "kind": "time",
+                "statement": (
+                    f"Recorded capture dates span {len(capture_dates)} dates "
+                    f"and {len(years)} years "
+                    f"from {capture_dates[0]} to {capture_dates[-1]}."
+                ),
+                "asset_ids": [
+                    asset_id
+                    for asset_id in ranked_ids
+                    if _capture_date(by_id[asset_id].get("capture_at")) is not None
+                ],
+                "facts": {"capture_dates": capture_dates, "years": years},
+            }
+        )
+
+    for kind, field, noun in (
+        ("camera", "camera_model", "camera"),
+        ("lens", "lens_model", "lens"),
+    ):
+        values = [str(member[field]).strip() for member in source if member.get(field)]
+        if not values:
+            continue
+        value, count = sorted(Counter(values).items(), key=lambda item: (-item[1], item[0]))[0]
+        if count < 2:
+            continue
+        matching_ids = [
+            asset_id
+            for asset_id in ranked_ids
+            if str(by_id[asset_id].get(field, "")).strip() == value
+        ]
+        observations.append(
+            {
+                "kind": kind,
+                "statement": f'{count} of {len(source)} frames report {noun} "{value}".',
+                "asset_ids": matching_ids,
+                "facts": {"value": value, "matching_frames": count},
+            }
+        )
+
+    sequence_items = _motif_sequence_items(
+        by_id,
+        ranked_ids,
+        representative_asset_id=representative_asset_id,
+        scores=scores,
+        limit=sequence_limit,
+    )
+    if len(years) > 1:
+        headline = f"Unlabeled visual motif across {len(years)} recorded years"
+    elif years:
+        headline = f"Unlabeled visual motif within {years[0]}"
+    else:
+        headline = "Unlabeled visual motif with no recorded capture year"
+    return {
+        "headline": headline,
+        "cross_year": len(years) > 1,
+        "member_count": len(source),
+        "capture_date_count": len(capture_dates),
+        "years": years,
+        "observations": observations,
+        "sequence_seed": {
+            "ordering": "representative_then_distinct_years_then_centroid_similarity",
+            "description": (
+                "Centroid representative first, then strongest evidence from distinct recorded "
+                "years, then remaining members by centroid cosine."
+            ),
+            "items": sequence_items,
+        },
+        "limitations": [
+            "This is an unlabeled grouping from local image embeddings and recorded EXIF only.",
+            "A cluster is a visual hypothesis, not a named subject or an artistic conclusion.",
+            "It does not establish place, identity, event, intention, or story.",
+        ],
+    }
+
+
+def _motif_sequence_items(
+    members: Mapping[int, Mapping[str, Any]],
+    ranked_ids: Sequence[int],
+    *,
+    representative_asset_id: int,
+    scores: Mapping[int, float],
+    limit: int,
+) -> list[dict[str, Any]]:
+    selected = [representative_asset_id]
+    roles = {representative_asset_id: "centroid_representative"}
+    representative_date = _capture_date(members[representative_asset_id].get("capture_at"))
+    used_years = {representative_date[:4]} if representative_date else set()
+    for asset_id in ranked_ids:
+        capture_date = _capture_date(members[asset_id].get("capture_at"))
+        if asset_id in selected or capture_date is None or capture_date[:4] in used_years:
+            continue
+        selected.append(asset_id)
+        roles[asset_id] = "distinct_year_evidence"
+        used_years.add(capture_date[:4])
+        if len(selected) >= limit:
+            break
+    for asset_id in ranked_ids:
+        if len(selected) >= limit:
+            break
+        if asset_id not in selected:
+            selected.append(asset_id)
+            roles[asset_id] = "visual_cluster_member"
+    return [
+        {
+            "position": position,
+            "asset_id": asset_id,
+            "role": roles[asset_id],
+            "centroid_similarity": scores[asset_id],
+        }
+        for position, asset_id in enumerate(selected, start=1)
+    ]
 
 
 def _asset_id(asset: Mapping[str, Any]) -> int:
