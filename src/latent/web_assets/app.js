@@ -7,6 +7,12 @@ const elements = {
   contactGrid: document.querySelector("#contactGrid"),
   contactStage: document.querySelector(".contact-stage"),
   copyPathButton: document.querySelector("#copyPathButton"),
+  curatorButton: document.querySelector("#curatorButton"),
+  curatorHeadline: document.querySelector("#curatorHeadline"),
+  curatorLimitations: document.querySelector("#curatorLimitations"),
+  curatorObservations: document.querySelector("#curatorObservations"),
+  curatorReport: document.querySelector("#curatorReport"),
+  curatorSequence: document.querySelector("#curatorSequence"),
   dateBreadcrumb: document.querySelector("#dateBreadcrumb"),
   dateList: document.querySelector("#dateList"),
   dateTitle: document.querySelector("#dateTitle"),
@@ -20,6 +26,7 @@ const elements = {
   inspectorImage: document.querySelector("#inspectorImage"),
   inspectorTitle: document.querySelector("#inspectorTitle"),
   librarySearch: document.querySelector("#librarySearch"),
+  loadingLabel: document.querySelector("#loadingLabel"),
   loadMoreButton: document.querySelector("#loadMoreButton"),
   loadingState: document.querySelector("#loadingState"),
   metaCamera: document.querySelector("#metaCamera"),
@@ -39,6 +46,7 @@ const elements = {
 const state = {
   assets: [],
   controller: null,
+  curatorRequestSerial: 0,
   currentDate: null,
   dates: [],
   hasMore: false,
@@ -262,6 +270,12 @@ function prepareResults(mode, query) {
   elements.contactStage.scrollTop = 0;
   elements.emptyState.hidden = true;
   elements.loadingState.hidden = false;
+  elements.loadingLabel.textContent =
+    mode === "semantic"
+      ? "Loading local model / searching embeddings"
+      : mode === "similar"
+        ? "Finding visual neighbors"
+        : "Reading local index";
   elements.paginationStatus.hidden = true;
   closeInspector(false);
   clearInspector();
@@ -372,6 +386,7 @@ function selectAsset(index, openOverlay) {
     return;
   }
   state.selectedIndex = index;
+  state.curatorRequestSerial += 1;
   const cards = [...elements.contactGrid.querySelectorAll(".photo-card")];
   cards.forEach((card, cardIndex) => {
     card.setAttribute("aria-selected", cardIndex === index ? "true" : "false");
@@ -392,6 +407,8 @@ function selectAsset(index, openOverlay) {
   elements.archivePath.textContent = asset.remote_path;
   elements.copyPathButton.textContent = "Copy archive path";
   elements.findSimilarButton.disabled = state.embeddingCount === 0;
+  elements.curatorButton.disabled = state.embeddingCount === 0;
+  clearCuratorReport();
   if (typeof asset.similarity === "number") {
     const interpretation =
       state.relationBasis?.interpretation ||
@@ -410,13 +427,69 @@ function selectAsset(index, openOverlay) {
 
 function clearInspector() {
   state.selectedIndex = -1;
+  state.curatorRequestSerial += 1;
   elements.inspectorContent.hidden = true;
   elements.inspectorEmpty.hidden = false;
   elements.inspectorTitle.textContent = "No selection";
   elements.inspectorImage.removeAttribute("src");
   elements.findSimilarButton.disabled = state.embeddingCount === 0;
+  elements.curatorButton.disabled = state.embeddingCount === 0;
   elements.relationEvidence.hidden = true;
   elements.relationEvidence.textContent = "";
+  clearCuratorReport();
+}
+
+function clearCuratorReport() {
+  elements.curatorReport.hidden = true;
+  elements.curatorHeadline.textContent = "";
+  elements.curatorObservations.replaceChildren();
+  elements.curatorSequence.textContent = "";
+  elements.curatorLimitations.textContent = "";
+  elements.curatorButton.textContent = "Build curator evidence";
+}
+
+async function loadCurator() {
+  const source = state.assets[state.selectedIndex];
+  if (!source || state.embeddingCount === 0) {
+    return;
+  }
+  const serial = state.curatorRequestSerial + 1;
+  state.curatorRequestSerial = serial;
+  elements.curatorButton.disabled = true;
+  elements.curatorButton.textContent = "Reading evidence";
+  elements.curatorReport.hidden = false;
+  elements.curatorHeadline.textContent = "Reading local model and EXIF evidence";
+  elements.curatorObservations.replaceChildren();
+  elements.curatorSequence.textContent = "";
+  elements.curatorLimitations.textContent = "";
+  try {
+    const payload = await requestJSON(`/api/assets/${source.id}/curator?limit=12`);
+    if (serial !== state.curatorRequestSerial) {
+      return;
+    }
+    const report = payload.report;
+    elements.curatorHeadline.textContent = report.headline;
+    for (const observation of report.observations) {
+      const item = document.createElement("li");
+      item.textContent = observation.statement;
+      elements.curatorObservations.append(item);
+    }
+    const sequenceCount = report.sequence_seed.items.length;
+    elements.curatorSequence.textContent =
+      `Sequence seed: ${sequenceCount} frames, source first then visual similarity.`;
+    elements.curatorLimitations.textContent = report.limitations.join(" ");
+  } catch (error) {
+    if (serial !== state.curatorRequestSerial) {
+      return;
+    }
+    elements.curatorHeadline.textContent = "Curator evidence unavailable";
+    elements.curatorLimitations.textContent = error.message;
+  } finally {
+    if (serial === state.curatorRequestSerial) {
+      elements.curatorButton.disabled = state.embeddingCount === 0;
+      elements.curatorButton.textContent = "Build curator evidence";
+    }
+  }
 }
 
 function closeInspector(restoreFocus = true) {
@@ -594,6 +667,7 @@ elements.mobileDateSelect.addEventListener("change", (event) => loadDate(event.t
 elements.inspectorClose.addEventListener("click", () => closeInspector());
 elements.copyPathButton.addEventListener("click", copyArchivePath);
 elements.findSimilarButton.addEventListener("click", () => void findSimilar());
+elements.curatorButton.addEventListener("click", () => void loadCurator());
 
 document.addEventListener("keydown", (event) => {
   const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;

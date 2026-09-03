@@ -159,11 +159,40 @@ HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 
 - 两种视口的浏览器控制台均没有 warning 或 error
 
 3 张样本只能证明 text encoder、vector ranking、Library metadata 和 HTTP/UI 的端到端连接。
-它不能证明全库检索质量，也不能支持有意义的 Curator 判断。
+它不能证明全库检索质量，也不能支持有意义的跨年份母题判断。
 正式 store 仍为 25,793 pending、0 succeeded、0 failed 和 0 vectors，必须在用户确认资源预算后才会启动全库构建。
 
 所有返回关系都明确标注为模型证据，不是地点、人物身份或故事的证明。
 服务只读取本地 SQLite、contact cache、embedding store 和本地模型目录，不读取 RAW、不访问 CloudDrive，也不写入 aDrive。
+
+## Grounded Curator evidence
+
+第一版 Curator 不调用聊天模型，也不根据照片内容补写叙事。
+它只把相似照片的 cosine 排名、`DateTimeOriginal` 日期、camera model 和 lens model 汇成结构化观察。
+输出同时包含来源 asset ID、原始事实、明确 limitations，以及一个 source-first、其后按相似度排序的 Sequence seed。
+
+3 张真实 contact 的桌面和手机 UI 验收得到以下结果：
+
+- 报告列出 2 个相似邻居，最近 cosine 为 0.979
+- 3 张照片都来自 `2026-08-29`
+- 3 张照片记录相同 camera model 和 lens model
+- Sequence seed 包含 source 加 2 个邻居，共 3 张
+- 限制语明确排除地点、身份、事件、意图和故事推断
+- 已有向量上的 Curator 请求与渲染耗时 0.522 秒
+- `1440x900` 右侧 inspector 与 `390x844` 覆盖层均能完整滚动到报告末尾
+- 两种视口都没有页面横向溢出，浏览器控制台没有 warning 或 error
+
+服务对客户端取消语义请求后的 `BrokenPipeError` 做静默终止，避免搜索切换污染长期运行日志。
+
+## Semantic runtime warmup evidence
+
+项目 venv 首次安装 embedding group 后，受控的 `transformers 5.16.1` 导入耗时 86.98 秒。
+同一环境的第二个新进程导入耗时 13.63 秒，随后服务的第一次完整语义查询耗时 25.369 秒。
+采样显示首次长等待发生在 Transformers 初始化 image processor alias 的阶段，模型权重尚未开始打开。
+
+这个结果与先前隔离 benchmark 环境的 6.638 秒冷查询差异明显，因此冷启动不能视为稳定指标。
+同一服务进程内的后续查询仍维持约 0.474 秒。
+界面会在语义请求期间明确显示正在加载本地模型并搜索 embedding，服务继续采用 lazy load，避免每次浏览图库都常驻约 4 GB 的模型工作集。
 
 ## Queue contract
 
@@ -181,5 +210,5 @@ HTTP 与界面 smoke test 使用 3 张真实 contact preview 和隔离的临时 
 
 ## Next step
 
-下一步是在资源预算确认后构建全库 embedding，并实现受证据约束的 Curator、Sequence 与可独立备份的 writable workspace。
+下一步是在资源预算确认后构建全库 embedding，并把 Curator 的 Sequence seed 接入可独立备份的 writable workspace。
 DxO handoff 需要先对一张未缓存 RAW 做启动路径、首屏等待、实际读取量和本地缓存增长的端到端测试。

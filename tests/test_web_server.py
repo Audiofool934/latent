@@ -23,7 +23,7 @@ from latent.embeddings import (
 from latent.models import PreviewLocation, ProbeResult, RemoteAsset
 from latent.search import SemanticSearch, VectorIndex
 from latent.storage import CacheManager, StateStore
-from latent.web_server import LibraryServer, _is_loopback
+from latent.web_server import LibraryRequestHandler, LibraryServer, _is_loopback
 
 
 class FakeTextEncoder:
@@ -343,6 +343,19 @@ def test_semantic_and_visual_similarity_apis_return_ranked_local_assets(
         assert [asset["id"] for asset in similar["results"]] == [3, 2]
         assert all(asset["id"] != 1 for asset in similar["results"])
 
+        curator, _ = _get_json(f"{base_url}/api/assets/1/curator?limit=2")
+        assert curator["mode"] == "grounded_curator"
+        assert curator["source"]["id"] == 1
+        assert [asset["id"] for asset in curator["neighbors"]] == [3, 2]
+        assert curator["report"]["headline"] == "Visual neighborhood across 2 capture dates"
+        assert [item["asset_id"] for item in curator["report"]["sequence_seed"]["items"]] == [
+            1,
+            3,
+            2,
+        ]
+        assert "does not establish place" in curator["report"]["limitations"][1]
+        assert curator["cloud_access"] is False
+
         with pytest.raises(HTTPError) as missing_embedding:
             urlopen(f"{base_url}/api/assets/999/similar", timeout=2)
         assert missing_embedding.value.code == 404
@@ -364,6 +377,10 @@ def test_semantic_apis_fail_closed_until_vectors_exist(tmp_path: Path) -> None:
             urlopen(f"{base_url}/api/assets/1/similar", timeout=2)
         assert unavailable_similar.value.code == 503
 
+        with pytest.raises(HTTPError) as unavailable_curator:
+            urlopen(f"{base_url}/api/assets/1/curator", timeout=2)
+        assert unavailable_curator.value.code == 503
+
 
 def test_loopback_detection_is_explicit() -> None:
     assert _is_loopback("127.0.0.1")
@@ -371,3 +388,14 @@ def test_loopback_detection_is_explicit() -> None:
     assert _is_loopback("localhost")
     assert not _is_loopback("0.0.0.0")
     assert not _is_loopback("example.test")
+
+
+def test_handler_silently_stops_after_client_disconnect() -> None:
+    handler = LibraryRequestHandler.__new__(LibraryRequestHandler)
+    handler.path = "/health"
+
+    def disconnect(*_args: object, **_kwargs: object) -> None:
+        raise BrokenPipeError
+
+    handler._send_json = disconnect
+    handler.do_GET()

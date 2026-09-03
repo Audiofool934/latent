@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from .curator import build_grounded_curator_report
 from .errors import ConfigurationError
 from .search import (
     DEFAULT_SIGLIP2_MODEL_CACHE,
@@ -27,6 +28,7 @@ _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_SEARCH_LENGTH = 200
 _STATIC_FILES = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js"}
 _SIMILAR_PATH = re.compile(r"^/api/assets/(\d+)/similar$")
+_CURATOR_PATH = re.compile(r"^/api/assets/(\d+)/curator$")
 
 
 class LibraryServer(ThreadingHTTPServer):
@@ -91,10 +93,14 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 self._serve_semantic_search(parse_qs(parsed.query))
             elif match := _SIMILAR_PATH.fullmatch(parsed.path):
                 self._serve_similar(int(match.group(1)), parse_qs(parsed.query))
+            elif match := _CURATOR_PATH.fullmatch(parsed.path):
+                self._serve_curator(int(match.group(1)), parse_qs(parsed.query))
             elif parsed.path.startswith("/media/"):
                 self._serve_media(parsed.path.removeprefix("/media/"))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except ConfigurationError as error:
             self._send_json(
                 {"error": type(error).__name__, "message": str(error)},
@@ -213,10 +219,46 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _serve_curator(
+        self,
+        asset_id: int,
+        query: dict[str, list[str]],
+    ) -> None:
+        limit = _bounded_int(_single(query, "limit"), default=12, minimum=1, maximum=50)
+        if self.server.vector_index.size == 0:
+            raise ConfigurationError("curator index has no completed vectors")
+        matches = self.server.vector_index.similar(asset_id, limit=limit)
+        source_assets = self._asset_payloads_by_ids([asset_id])
+        if not source_assets:
+            raise KeyError(f"asset {asset_id} is not available in the local library")
+        neighbors = self._hydrate_matches(matches)
+        report = build_grounded_curator_report(source_assets[0], neighbors)
+        self._send_json(
+            {
+                "mode": "grounded_curator",
+                "source": source_assets[0],
+                "neighbors": neighbors,
+                "report": report,
+                "basis": self._relation_basis(),
+                "cloud_access": False,
+            }
+        )
+
     def _send_matches(self, matches: list[Any], context: dict[str, Any]) -> None:
+        results = self._hydrate_matches(matches)
+        self._send_json(
+            {
+                **context,
+                "total": len(results),
+                "results": results,
+                "basis": self._relation_basis(),
+                "cloud_access": False,
+            }
+        )
+
+    def _hydrate_matches(self, matches: list[Any]) -> list[dict[str, Any]]:
         asset_ids = [int(match.asset_id) for match in matches]
-        with StateStore(self.server.state_dir) as store:
-            assets = store.library_assets_by_ids(asset_ids)
+        assets = self._asset_payloads_by_ids(asset_ids)
         by_id = {int(asset["id"]): asset for asset in assets}
         results = []
         for match in matches:
@@ -225,27 +267,27 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 continue
             results.append(
                 {
-                    **self._asset_payload(asset),
+                    **asset,
                     "rank": int(match.rank),
                     "similarity": float(match.score),
                 }
             )
-        self._send_json(
-            {
-                **context,
-                "total": len(results),
-                "results": results,
-                "basis": {
-                    "model_id": self.server.vector_index.model_id,
-                    "metric": "cosine_similarity",
-                    "source": "local_contact_embeddings",
-                    "interpretation": (
-                        "Similarity is model evidence, not proof of place, identity, or story."
-                    ),
-                },
-                "cloud_access": False,
-            }
-        )
+        return results
+
+    def _asset_payloads_by_ids(self, asset_ids: list[int]) -> list[dict[str, Any]]:
+        with StateStore(self.server.state_dir) as store:
+            assets = store.library_assets_by_ids(asset_ids)
+        return [self._asset_payload(asset) for asset in assets]
+
+    def _relation_basis(self) -> dict[str, str]:
+        return {
+            "model_id": self.server.vector_index.model_id,
+            "metric": "cosine_similarity",
+            "source": "local_contact_embeddings",
+            "interpretation": (
+                "Similarity is model evidence, not proof of place, identity, or story."
+            ),
+        }
 
     def _asset_payload(self, asset: dict[str, Any]) -> dict[str, Any]:
         preview_path = asset["preview_path"] or asset["contact_path"]

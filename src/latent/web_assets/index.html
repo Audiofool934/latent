@@ -87,7 +87,7 @@
         <section class="contact-stage" aria-live="polite">
           <div class="loading-state" id="loadingState">
             <div class="loading-line"></div>
-            <span>Reading local index</span>
+            <span id="loadingLabel">Reading local index</span>
           </div>
           <div class="empty-state" id="emptyState" hidden>
             <div class="empty-code">NO MATCHING FRAMES</div>
@@ -151,6 +151,15 @@
               Find visually similar
             </button>
             <p class="relation-evidence" id="relationEvidence" hidden></p>
+            <button class="text-button discover-button" id="curatorButton" type="button">
+              Build curator evidence
+            </button>
+            <div class="curator-report" id="curatorReport" aria-live="polite" hidden>
+              <p class="curator-headline" id="curatorHeadline"></p>
+              <ul class="curator-observations" id="curatorObservations"></ul>
+              <p class="curator-sequence" id="curatorSequence"></p>
+              <p class="curator-limitations" id="curatorLimitations"></p>
+            </div>
           </section>
         </div>
       </aside>

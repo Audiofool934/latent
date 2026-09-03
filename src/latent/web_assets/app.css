@@ -686,6 +686,56 @@ kbd {
   display: none;
 }
 
+.curator-report {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.curator-report[hidden] {
+  display: none;
+}
+
+.curator-headline {
+  margin: 0;
+  color: #cbd2cf;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.curator-observations {
+  display: grid;
+  gap: 8px;
+  margin: 11px 0 0;
+  padding: 0;
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 10px;
+  line-height: 1.45;
+  list-style: none;
+}
+
+.curator-observations li::before {
+  margin-right: 7px;
+  color: var(--signal);
+  content: "+";
+}
+
+.curator-sequence,
+.curator-limitations {
+  margin: 11px 0 0;
+  color: var(--faint);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.curator-limitations {
+  padding-top: 10px;
+  border-top: 1px solid #1b1f20;
+}
+
 @media (max-width: 1180px) {
   :root {
     --sidebar-width: 190px;
