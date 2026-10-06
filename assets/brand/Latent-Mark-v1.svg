@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">Latent — Mark v1</title>
+<desc id="desc">Two circular optical layers taper and compress toward a lower-right negative-space focus. All circles share an exact 45-degree diagonal mirror axis. Editable vector paths; no embedded image.</desc>
+<rect id="background" width="1024" height="1024" fill="#fff"/>
+<g id="latent-mark" fill="#101010">
+<path id="lens-layer-1" fill-rule="evenodd" d="M 128 512 A 384 384 0 1 0 896 512 A 384 384 0 1 0 128 512 Z M 216 534 A 318 318 0 1 0 852 534 A 318 318 0 1 0 216 534 Z"/>
+<path id="lens-layer-2" fill-rule="evenodd" d="M 335 572 A 237 237 0 1 0 809 572 A 237 237 0 1 0 335 572 Z M 445 607 A 162 162 0 1 0 769 607 A 162 162 0 1 0 445 607 Z"/>
+</g>
+</svg>

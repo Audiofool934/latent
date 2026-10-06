@@ -10,3 +10,5 @@ var/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+macos/.build/
+macos/.swiftpm/
