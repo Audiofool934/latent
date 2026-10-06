@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -46,6 +47,58 @@ def make_asset(name: str, body: bytes, *, remote_id: str = "asset-1") -> RemoteA
         write_time="2026-08-29T08:05:00+00:00",
         file_hashes={"2": remote_id},
     )
+
+
+def test_cloud_jpeg_uses_header_and_display_ready_preview_without_full_download(tmp_path):
+    original = Image.new("RGB", (1600, 1000), "navy")
+    exif = Image.Exif()
+    exif[272] = "Test Camera"
+    exif[274] = 6
+    exif[34665] = {
+        36867: "2025:06:01 12:34:56", 42036: "Test Lens",
+        37521: "012", 36881: "+08:00", 42033: "body-123", 42037: "lens-456",
+    }
+    body = io.BytesIO()
+    original.save(body, format="JPEG", exif=exif)
+    original_bytes = body.getvalue() + bytes(8 * 1024 * 1024)
+    preview_bytes = make_jpeg((500, 800))
+
+    class CloudJPEGSource:
+        asset = make_asset("original.JPG", original_bytes)
+        range_requests = bytes_transferred = metadata_elapsed_ms = 0
+        preview_reads = 0
+
+        def read_range(self, start, length):
+            assert start + length <= 512 * 1024
+            self.range_requests += 1
+            self.bytes_transferred += length
+            return original_bytes[start : start + length]
+
+        def read_preview(self, maximum_bytes):
+            assert len(preview_bytes) <= maximum_bytes
+            self.preview_reads += 1
+            self.bytes_transferred += len(preview_bytes)
+            return preview_bytes
+
+    source = CloudJPEGSource()
+    with StateStore(tmp_path) as store:
+        pipeline = PreviewPipeline(store, CacheManager(store))
+        result = pipeline.run(source)
+        assert result.bytes_transferred == 65536 + len(preview_bytes)
+        assert (result.preview_width, result.preview_height) == (500, 800)
+        assert result.preview_tag == "ProviderPreview"
+        row = store.connection.execute("SELECT * FROM assets").fetchone()
+        assert row["capture_at"] == "2025:06:01 12:34:56"
+        assert row["camera_model"] == "Test Camera"
+        assert row["lens_model"] == "Test Lens"
+        metadata = json.loads(row["exif_json"])
+        assert metadata["SubSecTimeOriginal"] == "012"
+        assert metadata["OffsetTimeOriginal"] == "+08:00"
+        assert metadata["BodySerialNumber"] == "body-123"
+        assert metadata["LensSerialNumber"] == "lens-456"
+        second = pipeline.run(source)
+        assert second.cache_hit and second.bytes_transferred == 0
+        assert source.preview_reads == 1
 
 
 def test_pipeline_fetches_bounded_ranges_then_hits_cache(tmp_path: Path) -> None:

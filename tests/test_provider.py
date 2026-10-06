@@ -64,3 +64,30 @@ def test_range_source_refuses_full_body_before_reading(monkeypatch: pytest.Monke
     assert response.read_called is False
     assert source.range_requests == 0
     assert source.bytes_transferred == 0
+
+
+def test_preview_source_refuses_original_sized_response_before_reading(monkeypatch):
+    source = object.__new__(CloudDriveRangeSource)
+    source._preview_url = "https://example.test/preview.jpg"
+    source.timeout_seconds = 10
+    source.bytes_transferred = 0
+    response = FullBodyResponse()
+    response.headers["Content-Length"] = str(15 * 1024 * 1024)
+    monkeypatch.setattr("latent.provider.urlopen", lambda *args, **kwargs: response)
+    with pytest.raises(ArchiveSafetyError, match="download limit"):
+        source.read_preview(4 * 1024 * 1024)
+    assert not response.read_called
+    assert source.bytes_transferred == 0
+
+
+def test_preview_source_bounds_responses_without_content_length(monkeypatch):
+    source = object.__new__(CloudDriveRangeSource)
+    source._preview_url = "https://example.test/preview.jpg"
+    source.timeout_seconds = 10
+    source.bytes_transferred = 0
+    response = FullBodyResponse()
+    monkeypatch.setattr("latent.provider.urlopen", lambda *args, **kwargs: response)
+    with pytest.raises(ArchiveSafetyError, match="download limit"):
+        source.read_preview(100)
+    assert response.read_called
+    assert source.bytes_transferred == 101

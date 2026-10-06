@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 
+from .editing import DEFAULT_EDITING_DIR
 from .embeddings import (
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
@@ -21,6 +22,7 @@ from .embeddings import (
 from .errors import ConfigurationError, EmbeddingServiceError, LatentError
 from .gemini import GEMINI_STORE_NAME, MAX_BATCH_SIZE, GeminiEmbeddingEncoder
 from .jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
+from .jpeg_backfill import enqueue_jpeg_plan, plan_jpeg_backfill
 from .preview import MIB, ExifToolProbe, PreviewPipeline
 from .provider import (
     DEFAULT_CLOUDDRIVE_ENDPOINT,
@@ -29,6 +31,7 @@ from .provider import (
     CloudDriveRangeSource,
 )
 from .storage import GIB, CacheManager, StateStore
+from .timelapse import AuditOptions, audit_catalog
 from .web_server import serve_library
 from .workspace import (
     DEFAULT_WORKSPACE_DIR,
@@ -79,6 +82,39 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--retry-failed", action="store_true")
     scan.add_argument("--json", action="store_true")
     scan.set_defaults(handler=_run_scan)
+
+    jpeg_scan = subparsers.add_parser(
+        "scan-jpeg", help="plan missing JPEG originals and optionally enqueue bounded previews"
+    )
+    jpeg_scan.add_argument(
+        "--path", action="append", required=True,
+        help="CloudDrive photo directory; repeat for multiple dates",
+    )
+    jpeg_scan.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    jpeg_scan.add_argument("--endpoint", default=DEFAULT_CLOUDDRIVE_ENDPOINT)
+    jpeg_scan.add_argument("--plist", type=Path, default=DEFAULT_CLOUDDRIVE_PLIST)
+    jpeg_scan.add_argument(
+        "--recursive", action="store_true",
+        help="list nested folders as review candidates, without importing them",
+    )
+    jpeg_scan.add_argument("--force-refresh", action="store_true")
+    jpeg_scan.add_argument("--apply", action="store_true", help="enqueue only unpaired candidates")
+    jpeg_scan.add_argument("--report", type=Path, help="save the complete plan and review list")
+    jpeg_scan.add_argument("--json", action="store_true")
+    jpeg_scan.set_defaults(handler=_run_jpeg_scan)
+
+    timelapse = subparsers.add_parser(
+        "timelapse-audit", help="find interval-shooting candidates using local EXIF only"
+    )
+    timelapse.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    timelapse.add_argument("--path", action="append", help="limit to a catalog source directory")
+    timelapse.add_argument("--min-frames", type=_positive_int, default=30)
+    timelapse.add_argument("--min-duration-seconds", type=float, default=120)
+    timelapse.add_argument("--min-interval-seconds", type=float, default=1)
+    timelapse.add_argument("--max-interval-seconds", type=float, default=120)
+    timelapse.add_argument("--report", type=Path, help="save candidates and evidence as JSON")
+    timelapse.add_argument("--json", action="store_true", help="print the audit summary as JSON")
+    timelapse.set_defaults(handler=_run_timelapse_audit)
 
     tree_scan = subparsers.add_parser(
         "scan-tree",
@@ -137,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = subparsers.add_parser(
         "serve",
-        help="serve the cached local index as a read-only contact sheet",
+        help="serve the cached library, local workspace, and explicit editing transfers",
     )
     serve.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     serve.add_argument("--host", default="127.0.0.1")
@@ -148,10 +184,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow binding to a non-loopback interface",
     )
     serve.add_argument("--embedding-dir", type=Path)
+    serve.add_argument("--ready-json", action="store_true", help="emit one JSON readiness record")
+    serve.add_argument(
+        "--exit-on-stdin-close",
+        action="store_true",
+        help="stop when an explicit owner closes stdin",
+    )
     serve.add_argument(
         "--workspace-dir",
         type=Path,
         default=DEFAULT_WORKSPACE_DIR,
+    )
+    serve.add_argument(
+        "--editing-dir",
+        type=Path,
+        default=DEFAULT_EDITING_DIR,
+        help="working RAWs and edits for new batches (default: ~/Pictures/Latent)",
     )
     serve.set_defaults(handler=_run_serve)
 
@@ -336,6 +384,65 @@ def _run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_jpeg_scan(args: argparse.Namespace) -> int:
+    catalog = CloudDriveCatalog(endpoint=args.endpoint, plist_path=args.plist)
+    plan = plan_jpeg_backfill(
+        catalog, args.path, args.state_dir,
+        recursive=args.recursive, force_refresh=args.force_refresh,
+    )
+    payload = plan.summary() | {"applied": args.apply}
+    if args.apply:
+        with StateStore(args.state_dir) as store:
+            payload.update(enqueue_jpeg_plan(plan, store))
+    if args.report:
+        write_workspace_export(args.report, plan.as_dict() | payload)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(
+            f"JPEGs: {payload['candidates']} candidates, {payload['raw_pairs']} RAW pairs, "
+            f"{payload['already_indexed']} indexed, {payload['needs_review']} need review"
+        )
+        print(
+            "Preview jobs enqueued." if args.apply else "Plan only; the catalog was not modified."
+        )
+    return 0
+
+
+def _run_timelapse_audit(args: argparse.Namespace) -> int:
+    if args.report and args.report.expanduser().resolve() == (
+        args.state_dir.expanduser().resolve() / "index.sqlite"
+    ):
+        raise ConfigurationError("The report must not overwrite the library catalog")
+    result = audit_catalog(
+        args.state_dir, paths=args.path,
+        options=AuditOptions(
+            min_frames=args.min_frames,
+            min_duration_seconds=args.min_duration_seconds,
+            min_interval_seconds=args.min_interval_seconds,
+            max_interval_seconds=args.max_interval_seconds,
+        ),
+    )
+    if args.report:
+        write_workspace_export(args.report, result)
+    summary = result["summary"]
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(
+            f"{summary['scanned_assets']} local records: "
+            f"{summary['candidate_segments']} candidate segments, "
+            f"{summary['candidate_frames']} frames"
+        )
+        print(
+            f"{summary['elapsed_seconds']:.3f}s; no archive reads, API calls, or catalog changes."
+        )
+        print("Candidates require review; photos have not been hidden or reclassified.")
+        if args.report:
+            print(f"Report: {args.report.expanduser().resolve()}")
+    return 0
+
+
 def _run_tree_scan(args: argparse.Namespace) -> int:
     if args.scan_id is not None and (args.force_refresh or args.include_hidden):
         raise ConfigurationError(
@@ -460,6 +567,9 @@ def _run_serve(args: argparse.Namespace) -> int:
         allow_remote=args.allow_remote,
         embedding_dir=args.embedding_dir,
         workspace_dir=args.workspace_dir,
+        editing_dir=args.editing_dir,
+        ready_json=args.ready_json,
+        exit_on_stdin_close=args.exit_on_stdin_close,
     )
     return 0
 

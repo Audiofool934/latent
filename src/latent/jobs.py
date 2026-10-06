@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Protocol
 
+from .archive_copies import ArchiveCopies
 from .models import DirectoryListing, PipelineResult, RemoteAsset
 from .preview import PreviewPipeline
 from .provider import RangeSource
@@ -160,7 +161,10 @@ class DirectoryImporter:
             limit=limit,
         )
         enqueued = 0
+        archived = ArchiveCopies(self.store.state_dir).paths(cloud=True)
         for priority, asset in enumerate(reversed(assets)):
+            if asset.remote_path in archived:
+                continue
             asset_id = self.store.upsert_asset(asset)
             if self.store.enqueue_preview_job(
                 asset_id,
@@ -270,7 +274,10 @@ class ArchiveTreeScanner:
                         job.depth + 1,
                     )
                 enqueued = 0
+                archived = ArchiveCopies(self.store.state_dir).paths(cloud=True)
                 for priority, asset in enumerate(reversed(listing.assets)):
+                    if asset.remote_path in archived:
+                        continue
                     asset_id = self.store.upsert_asset(asset)
                     if self.store.enqueue_preview_job(
                         asset_id,

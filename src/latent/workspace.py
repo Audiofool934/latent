@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -15,9 +16,13 @@ from uuid import uuid4
 
 from .errors import ConfigurationError
 
-WORKSPACE_SCHEMA_VERSION = 1
+WORKSPACE_SCHEMA_VERSION = 5
+_UNCHANGED = object()
 WORKSPACE_EXPORT_FORMAT = "latent-workspace"
 DEFAULT_WORKSPACE_DIR = Path.home() / "Library/Application Support/Latent/workspace"
+# Request threads may open a fresh workspace together. Keep schema creation and
+# version insertion indivisible within this process; normal operations use SQLite.
+_INITIALIZATION_LOCK = threading.Lock()
 
 
 def utc_now() -> str:
@@ -66,18 +71,19 @@ class WorkspaceStore:
         self.workspace_dir = workspace_dir.expanduser().resolve()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.database_path = self.workspace_dir / "workspace.sqlite"
-        self.connection = sqlite3.connect(self.database_path)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.execute("PRAGMA busy_timeout=5000")
-        try:
-            self._migrate()
-            self._validate_configuration()
-        except Exception:
-            self.connection.close()
-            raise
+        with _INITIALIZATION_LOCK:
+            self.connection = sqlite3.connect(self.database_path)
+            try:
+                self.connection.row_factory = sqlite3.Row
+                self.connection.execute("PRAGMA busy_timeout=5000")
+                self.connection.execute("PRAGMA foreign_keys=ON")
+                self.connection.execute("PRAGMA journal_mode=WAL")
+                self.connection.execute("PRAGMA synchronous=FULL")
+                self._migrate()
+                self._validate_configuration()
+            except Exception:
+                self.connection.close()
+                raise
 
     def close(self) -> None:
         self.connection.close()
@@ -89,11 +95,30 @@ class WorkspaceStore:
         self.close()
 
     def _migrate(self) -> None:
+        # Validate an existing version before changing any user-authored state.
+        has_meta = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_meta'"
+        ).fetchone()
+        if has_meta:
+            version = self.connection.execute(
+                "SELECT value FROM workspace_meta WHERE key='schema_version'"
+            ).fetchone()
+            if version is None or str(version[0]) not in {"1", "2", "3", "4", "5"}:
+                raise ConfigurationError("workspace schema version is not supported")
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS workspace_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sequence_folders (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                parent_id TEXT REFERENCES sequence_folders(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(parent_id IS NULL OR parent_id != id)
             );
 
             CREATE TABLE IF NOT EXISTS sequences (
@@ -124,10 +149,39 @@ class WorkspaceStore:
 
             CREATE INDEX IF NOT EXISTS idx_sequence_items_order
             ON sequence_items(sequence_id, position);
+
+            CREATE TABLE IF NOT EXISTS photo_annotations (
+                provider TEXT NOT NULL,
+                remote_path TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                name TEXT NOT NULL,
+                rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+                caption TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider, remote_path)
+            );
             """
         )
+        columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(photo_annotations)")
+        }
+        if "flag" not in columns:
+            self.connection.execute(
+                "ALTER TABLE photo_annotations ADD COLUMN flag TEXT NOT NULL DEFAULT 'unmarked' "
+                "CHECK(flag IN ('unmarked', 'pick', 'reject'))"
+            )
+        sequence_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(sequences)")
+        }
+        if "folder_id" not in sequence_columns:
+            self.connection.execute(
+                "ALTER TABLE sequences ADD COLUMN folder_id TEXT "
+                "REFERENCES sequence_folders(id) ON DELETE RESTRICT"
+            )
+        if "smart_filters_json" not in sequence_columns:
+            self.connection.execute("ALTER TABLE sequences ADD COLUMN smart_filters_json TEXT")
         self.connection.execute(
-            "INSERT OR IGNORE INTO workspace_meta(key, value) VALUES ('schema_version', ?)",
+            "INSERT OR REPLACE INTO workspace_meta(key, value) VALUES ('schema_version', ?)",
             (str(WORKSPACE_SCHEMA_VERSION),),
         )
         self.connection.commit()
@@ -149,21 +203,44 @@ class WorkspaceStore:
         note: str = "",
         origin: str = "manual",
         sequence_id: str | None = None,
+        reuse_existing: bool = False,
+        folder_id: str | None = None,
+        smart_filters: dict | None = None,
     ) -> dict[str, Any]:
         normalized_name = _required_text(name, "sequence name", maximum=120)
         normalized_note = _optional_text(note, "sequence note", maximum=10_000)
         normalized_origin = _required_text(origin, "sequence origin", maximum=50)
         identifier = sequence_id or str(uuid4())
         _required_text(identifier, "sequence id", maximum=100)
-        now = utc_now()
-        self.connection.execute(
-            """
-            INSERT INTO sequences(id, name, note, origin, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (identifier, normalized_name, normalized_note, normalized_origin, now, now),
-        )
-        self.connection.commit()
+        smart = _smart_filters_json(smart_filters)
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            existing = self.connection.execute(
+                "SELECT id FROM sequences WHERE id=?", (identifier,)
+            ).fetchone()
+            if not (reuse_existing and existing):
+                if folder_id is not None:
+                    self.get_folder(folder_id)
+                now = utc_now()
+                self.connection.execute(
+                    "INSERT INTO sequences(id, name, note, origin, created_at, "
+                    "updated_at, folder_id, smart_filters_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        identifier,
+                        normalized_name,
+                        normalized_note,
+                        normalized_origin,
+                        now,
+                        now,
+                        folder_id,
+                        smart,
+                    ),
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
         return self.get_sequence(identifier)
 
     def list_sequences(self) -> list[dict[str, Any]]:
@@ -176,7 +253,7 @@ class WorkspaceStore:
             ORDER BY s.updated_at DESC, s.name ASC, s.id ASC
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_sequence_record(row) for row in rows]
 
     def get_sequence(self, sequence_id: str) -> dict[str, Any]:
         row = self.connection.execute(
@@ -185,7 +262,7 @@ class WorkspaceStore:
         ).fetchone()
         if row is None:
             raise KeyError(f"sequence {sequence_id!r} was not found")
-        sequence = dict(row)
+        sequence = _sequence_record(row)
         sequence["items"] = [
             dict(item)
             for item in self.connection.execute(
@@ -206,35 +283,232 @@ class WorkspaceStore:
         *,
         name: str | None = None,
         note: str | None = None,
+        folder_id: str | None | object = _UNCHANGED,
+        smart_filters: dict | object = _UNCHANGED,
     ) -> dict[str, Any]:
-        current = self.get_sequence(sequence_id)
-        next_name = (
-            _required_text(name, "sequence name", maximum=120)
-            if name is not None
-            else str(current["name"])
-        )
+        existing = self.get_sequence(sequence_id)
+        if smart_filters is not _UNCHANGED and existing["smart_filters"] is None:
+            raise ValueError("Only smart sequences have saved filters")
+        smart = _smart_filters_json(smart_filters) if smart_filters is not _UNCHANGED else None
+        next_name = _required_text(name, "sequence name", maximum=120) if name is not None else None
         next_note = (
-            _optional_text(note, "sequence note", maximum=10_000)
-            if note is not None
-            else str(current["note"])
+            _optional_text(note, "sequence note", maximum=10_000) if note is not None else None
         )
-        self.connection.execute(
-            "UPDATE sequences SET name=?, note=?, updated_at=? WHERE id=?",
-            (next_name, next_note, utc_now(), sequence_id),
-        )
-        self.connection.commit()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if folder_id is not _UNCHANGED and folder_id is not None:
+                self.get_folder(folder_id)
+            self.connection.execute(
+                "UPDATE sequences SET name=COALESCE(?, name), note=COALESCE(?, note), "
+                "updated_at=? WHERE id=?",
+                (next_name, next_note, utc_now(), sequence_id),
+            )
+            if folder_id is not _UNCHANGED:
+                self.connection.execute(
+                    "UPDATE sequences SET folder_id=? WHERE id=?", (folder_id, sequence_id)
+                )
+            if smart_filters is not _UNCHANGED:
+                self.connection.execute(
+                    "UPDATE sequences SET smart_filters_json=? WHERE id=?", (smart, sequence_id)
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
         return self.get_sequence(sequence_id)
+
+    def list_folders(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM sequence_folders ORDER BY name COLLATE NOCASE, id"
+            )
+        ]
+
+    def get_folder(self, folder_id: str) -> dict[str, Any]:
+        identifier = _required_text(folder_id, "folder id", maximum=100)
+        row = self.connection.execute(
+            "SELECT * FROM sequence_folders WHERE id=?", (identifier,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"folder {identifier!r} was not found")
+        return dict(row)
+
+    def create_folder(
+        self,
+        name: str,
+        *,
+        parent_id: str | None = None,
+        folder_id: str | None = None,
+        reuse_existing: bool = False,
+    ) -> dict[str, Any]:
+        name = _required_text(name, "folder name", maximum=120)
+        identifier = _required_text(folder_id or str(uuid4()), "folder id", maximum=100)
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            existing = self.connection.execute(
+                "SELECT id FROM sequence_folders WHERE id=?", (identifier,)
+            ).fetchone()
+            if reuse_existing and existing:
+                self.connection.commit()
+                return self.get_folder(identifier)
+            if parent_id is not None:
+                self.get_folder(parent_id)
+            if parent_id == identifier:
+                raise ValueError("A folder cannot contain itself")
+            now = utc_now()
+            self.connection.execute(
+                "INSERT INTO sequence_folders(id, name, parent_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)"
+                + (" ON CONFLICT(id) DO NOTHING" if reuse_existing else ""),
+                (identifier, name, parent_id, now, now),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return self.get_folder(identifier)
+
+    def update_folder(
+        self,
+        folder_id: str,
+        *,
+        name: str | None = None,
+        parent_id: str | None | object = _UNCHANGED,
+    ) -> dict[str, Any]:
+        next_name = _required_text(name, "folder name", maximum=120) if name is not None else None
+        try:
+            # Serialize parent changes so concurrent moves cannot create a cycle.
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.get_folder(folder_id)
+            if parent_id is not _UNCHANGED:
+                if parent_id is not None:
+                    parent_id = _required_text(parent_id, "parent folder id", maximum=100)
+                seen = {folder_id}
+                ancestor = parent_id
+                while ancestor is not None:
+                    if ancestor in seen:
+                        raise ValueError("A folder cannot be moved inside itself or a descendant")
+                    seen.add(ancestor)
+                    ancestor = self.get_folder(ancestor)["parent_id"]
+                self.connection.execute(
+                    "UPDATE sequence_folders SET parent_id=? WHERE id=?", (parent_id, folder_id)
+                )
+            self.connection.execute(
+                "UPDATE sequence_folders SET name=COALESCE(?, name), updated_at=? WHERE id=?",
+                (next_name, utc_now(), folder_id),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return self.get_folder(folder_id)
+
+    def remove_folder(self, folder_id: str) -> None:
+        """Remove a grouping only; promote its children and sequences to its parent."""
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            folder = self.get_folder(folder_id)
+            now = utc_now()
+            self.connection.execute(
+                "UPDATE sequence_folders SET parent_id=?, updated_at=? WHERE parent_id=?",
+                (folder["parent_id"], now, folder_id),
+            )
+            self.connection.execute(
+                "UPDATE sequences SET folder_id=?, updated_at=? WHERE folder_id=?",
+                (folder["parent_id"], now, folder_id),
+            )
+            self.connection.execute("DELETE FROM sequence_folders WHERE id=?", (folder_id,))
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def delete_sequence(self, sequence_id: str) -> bool:
         cursor = self.connection.execute("DELETE FROM sequences WHERE id=?", (sequence_id,))
         self.connection.commit()
         return bool(cursor.rowcount)
 
+    def annotations(
+        self, identities: Sequence[tuple[str, str]] | None = None
+    ) -> list[dict[str, Any]]:
+        if identities is None:
+            return [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM photo_annotations ORDER BY provider, remote_path"
+                )
+            ]
+        results = []
+        # Bound SQL parameters, even when loading a large saved selection.
+        for start in range(0, len(identities), 300):
+            chunk = identities[start : start + 300]
+            placeholders = ",".join("(?, ?)" for _ in chunk)
+            results.extend(
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM photo_annotations WHERE "
+                    f"(provider, remote_path) IN ({placeholders})",
+                    [part for identity in chunk for part in identity],
+                )
+            )
+        return results
+
+    def annotate(
+        self,
+        assets: Sequence[WorkspaceAsset],
+        *,
+        rating: int | None = None,
+        caption: str | None = None,
+        flag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if rating is None and caption is None and flag is None:
+            raise ValueError("provide a rating, caption, or flag")
+        if flag is not None and flag not in ("unmarked", "pick", "reject"):
+            raise ValueError("flag must be unmarked, pick, or reject")
+        if rating is not None and (type(rating) is not int or not 0 <= rating <= 5):
+            raise ValueError("rating must be an integer from 0 to 5")
+        if caption is not None:
+            caption = _optional_text(caption, "caption", maximum=2000)
+        for asset in assets:
+            _validate_asset(asset)
+        now = utc_now()
+        with self.connection:
+            for asset in assets:
+                self.connection.execute(
+                    """
+                    INSERT INTO photo_annotations(provider, remote_path, fingerprint, name,
+                                                  rating, caption, flag, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, remote_path) DO UPDATE SET
+                        fingerprint=excluded.fingerprint, name=excluded.name,
+                        rating=COALESCE(?, photo_annotations.rating),
+                        caption=COALESCE(?, photo_annotations.caption),
+                        flag=COALESCE(?, photo_annotations.flag),
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        asset.provider,
+                        asset.remote_path,
+                        asset.fingerprint,
+                        asset.name,
+                        rating if rating is not None else 0,
+                        caption or "",
+                        flag or "unmarked",
+                        now,
+                        rating,
+                        caption,
+                        flag,
+                    ),
+                )
+        return self.annotations([asset.identity for asset in assets])
+
     def add_items(
         self,
         sequence_id: str,
         assets: Sequence[WorkspaceAsset],
     ) -> AddItemsResult:
+        self._require_manual_sequence(sequence_id)
         source = list(assets)
         identities = [asset.identity for asset in source]
         if len(set(identities)) != len(identities):
@@ -304,6 +578,7 @@ class WorkspaceStore:
         return AddItemsResult(len(item_ids), skipped, tuple(item_ids))
 
     def reorder_items(self, sequence_id: str, item_ids: Sequence[str]) -> dict[str, Any]:
+        self._require_manual_sequence(sequence_id)
         wanted = list(item_ids)
         if len(wanted) != len(set(wanted)):
             raise ValueError("reordered item IDs must be unique")
@@ -334,6 +609,7 @@ class WorkspaceStore:
         return self.get_sequence(sequence_id)
 
     def remove_item(self, sequence_id: str, item_id: str) -> bool:
+        self._require_manual_sequence(sequence_id)
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self.get_sequence(sequence_id)
@@ -370,18 +646,41 @@ class WorkspaceStore:
             "format": WORKSPACE_EXPORT_FORMAT,
             "schema_version": WORKSPACE_SCHEMA_VERSION,
             "exported_at": utc_now(),
+            "folders": self.list_folders(),
             "sequences": [
                 self.get_sequence(str(sequence["id"])) for sequence in self.list_sequences()
             ],
+            "annotations": self.annotations(),
         }
 
     def merge_import(self, payload: Mapping[str, Any]) -> ImportResult:
         sequences = _validated_import_sequences(payload)
+        annotations = _validated_import_annotations(payload)
+        folders = _validated_import_folders(payload)
+        folder_ids = {folder["id"] for folder in folders}
+        if any(s["folder_id"] is not None and s["folder_id"] not in folder_ids for s in sequences):
+            raise ValueError("workspace export sequence folder was not found")
         imported = 0
         unchanged = 0
         conflicts = 0
         try:
             self.connection.execute("BEGIN IMMEDIATE")
+            for folder in folders:
+                existing = self.connection.execute(
+                    "SELECT * FROM sequence_folders WHERE id=?", (folder["id"],)
+                ).fetchone()
+                if existing is not None:
+                    if dict(existing) == folder:
+                        unchanged += 1
+                    else:
+                        conflicts += 1
+                    continue
+                self.connection.execute(
+                    "INSERT INTO sequence_folders(id, name, parent_id, created_at, updated_at) "
+                    "VALUES (:id, :name, :parent_id, :created_at, :updated_at)",
+                    folder,
+                )
+                imported += 1
             for sequence in sequences:
                 existing = self.connection.execute(
                     "SELECT 1 FROM sequences WHERE id=?",
@@ -396,6 +695,22 @@ class WorkspaceStore:
                     continue
                 self._insert_imported_sequence(sequence)
                 imported += 1
+            for annotation in annotations:
+                current = self.annotations([(annotation["provider"], annotation["remote_path"])])
+                if current:
+                    if current[0] == annotation:
+                        unchanged += 1
+                    else:
+                        conflicts += 1
+                    continue
+                self.connection.execute(
+                    """INSERT INTO photo_annotations(provider, remote_path, fingerprint, name,
+                                                     rating, caption, flag, updated_at)
+                       VALUES (:provider, :remote_path, :fingerprint, :name,
+                               :rating, :caption, :flag, :updated_at)""",
+                    annotation,
+                )
+                imported += 1
             self.connection.commit()
         except Exception:
             self.connection.rollback()
@@ -405,8 +720,9 @@ class WorkspaceStore:
     def _insert_imported_sequence(self, sequence: Mapping[str, Any]) -> None:
         self.connection.execute(
             """
-            INSERT INTO sequences(id, name, note, origin, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sequences(id, name, note, origin, created_at, updated_at,
+                                  folder_id, smart_filters_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sequence["id"],
@@ -415,6 +731,8 @@ class WorkspaceStore:
                 sequence["origin"],
                 sequence["created_at"],
                 sequence["updated_at"],
+                sequence["folder_id"],
+                _smart_filters_json(sequence.get("smart_filters")),
             ),
         )
         self.connection.executemany(
@@ -443,6 +761,10 @@ class WorkspaceStore:
             ),
         )
 
+    def _require_manual_sequence(self, sequence_id: str) -> None:
+        if self.get_sequence(sequence_id)["smart_filters"] is not None:
+            raise ValueError("Smart sequence photos are controlled by its saved filters")
+
     def status(self) -> dict[str, Any]:
         sequence_count = int(
             self.connection.execute("SELECT COUNT(*) FROM sequences").fetchone()[0]
@@ -457,8 +779,26 @@ class WorkspaceStore:
             "database_integrity": integrity,
             "sequences": sequence_count,
             "items": item_count,
+            "annotations": int(
+                self.connection.execute("SELECT COUNT(*) FROM photo_annotations").fetchone()[0]
+            ),
             "archive_modified": False,
         }
+
+
+def _smart_filters_json(value: dict | None) -> str | None:
+    if value is None:
+        return None
+    from .filters import photo_filters
+
+    return json.dumps(photo_filters(value), sort_keys=True)
+
+
+def _sequence_record(row) -> dict:
+    record = dict(row)
+    encoded = record.pop("smart_filters_json", None)
+    record["smart_filters"] = json.loads(encoded) if encoded is not None else None
+    return record
 
 
 def write_workspace_export(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -509,10 +849,97 @@ def _validate_asset(asset: WorkspaceAsset) -> None:
     _optional_text(asset.lens_model, "asset lens model", maximum=1024)
 
 
+def _validated_import_annotations(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source = payload.get("annotations", [] if payload["schema_version"] == 1 else None)
+    if not isinstance(source, list):
+        raise ValueError("workspace export annotations must be a list")
+    identities = set()
+    result = []
+    for row in source:
+        if not isinstance(row, Mapping):
+            raise ValueError("workspace export annotation must be an object")
+        rating = row.get("rating")
+        if type(rating) is not int or not 0 <= rating <= 5:
+            raise ValueError("rating must be an integer from 0 to 5")
+        flag = row.get("flag", "unmarked")
+        if flag not in ("unmarked", "pick", "reject"):
+            raise ValueError("flag must be unmarked, pick, or reject")
+        annotation = {
+            "flag": flag,
+            "provider": _required_text(row.get("provider"), "asset provider", maximum=120),
+            "remote_path": _required_text(
+                row.get("remote_path"), "asset remote path", maximum=4096
+            ),
+            "fingerprint": _required_text(
+                row.get("fingerprint"), "asset fingerprint", maximum=2048
+            ),
+            "name": _required_text(row.get("name"), "asset name", maximum=1024),
+            "rating": rating,
+            "caption": _optional_text(row.get("caption"), "caption", maximum=2000),
+            "updated_at": _required_text(row.get("updated_at"), "annotation time", maximum=120),
+        }
+        identity = annotation["provider"], annotation["remote_path"]
+        if identity in identities:
+            raise ValueError("workspace export annotation identities must be unique")
+        identities.add(identity)
+        result.append(annotation)
+    return result
+
+
+def _validated_import_folders(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source = payload.get("folders", [] if payload["schema_version"] < 4 else None)
+    if not isinstance(source, list):
+        raise ValueError("workspace export folders must be a list")
+    folders = {}
+    for row in source:
+        if not isinstance(row, Mapping):
+            raise ValueError("workspace export folder must be an object")
+        identifier = _required_text(row.get("id"), "folder id", maximum=100)
+        if identifier in folders:
+            raise ValueError("workspace export folder IDs must be unique")
+        parent = row.get("parent_id")
+        folders[identifier] = {
+            "id": identifier,
+            "name": _required_text(row.get("name"), "folder name", maximum=120),
+            "parent_id": (
+                _required_text(parent, "parent folder id", maximum=100)
+                if parent is not None
+                else None
+            ),
+            "created_at": _required_text(row.get("created_at"), "folder created time", maximum=120),
+            "updated_at": _required_text(row.get("updated_at"), "folder updated time", maximum=120),
+        }
+    # Iterative traversal supports deep trees without Python recursion limits.
+    ordered = []
+    done = set()
+    for identifier in folders:
+        path = []
+        seen = set()
+        current = identifier
+        while current is not None and current not in done:
+            if current not in folders:
+                raise ValueError("workspace export parent folder was not found")
+            if current in seen:
+                raise ValueError("workspace export folder hierarchy contains a cycle")
+            seen.add(current)
+            path.append(current)
+            current = folders[current]["parent_id"]
+        for current in reversed(path):
+            ordered.append(folders[current])
+            done.add(current)
+    return ordered
+
+
 def _validated_import_sequences(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if payload.get("format") != WORKSPACE_EXPORT_FORMAT:
         raise ValueError("workspace export format is not supported")
-    if payload.get("schema_version") != WORKSPACE_SCHEMA_VERSION:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] not in {
+        1,
+        2,
+        3,
+        4,
+        5,
+    }:
         raise ValueError("workspace export schema version is not supported")
     source = payload.get("sequences")
     if not isinstance(source, list):
@@ -595,6 +1022,16 @@ def _validated_import_sequences(payload: Mapping[str, Any]) -> list[dict[str, An
         validated.append(
             {
                 "id": sequence_id,
+                "smart_filters": (
+                    json.loads(_smart_filters_json(raw_sequence["smart_filters"]))
+                    if raw_sequence.get("smart_filters") is not None
+                    else None
+                ),
+                "folder_id": (
+                    _required_text(raw_sequence["folder_id"], "sequence folder id", maximum=100)
+                    if raw_sequence.get("folder_id") is not None
+                    else None
+                ),
                 "name": _required_text(
                     raw_sequence.get("name"),
                     "sequence name",
@@ -630,7 +1067,17 @@ def _validated_import_sequences(payload: Mapping[str, Any]) -> list[dict[str, An
 def _comparable_sequence(sequence: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: sequence[key]
-        for key in ("id", "name", "note", "origin", "created_at", "updated_at", "items")
+        for key in (
+            "id",
+            "name",
+            "note",
+            "origin",
+            "created_at",
+            "updated_at",
+            "folder_id",
+            "smart_filters",
+            "items",
+        )
     }
 
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 
@@ -63,11 +67,12 @@ def test_workspace_sequence_crud_is_persistent_and_ordered(tmp_path: Path) -> No
         ]
         assert [item["position"] for item in remaining["items"]] == [0, 1]
         assert store.status() == {
-            "schema_version": 1,
+            "schema_version": 5,
             "database_path": str(workspace_dir / "workspace.sqlite"),
             "database_integrity": "ok",
             "sequences": 1,
             "items": 2,
+            "annotations": 0,
             "archive_modified": False,
         }
 
@@ -80,6 +85,77 @@ def test_workspace_sequence_crud_is_persistent_and_ordered(tmp_path: Path) -> No
         ]
         assert reopened.delete_sequence(sequence_id)
         assert reopened.status()["items"] == 0
+
+
+@pytest.mark.parametrize("field", ["name", "note"])
+def test_partial_sequence_update_preserves_an_interleaved_change(
+    tmp_path: Path, field: str
+) -> None:
+    with WorkspaceStore(tmp_path) as first, WorkspaceStore(tmp_path) as second:
+        sequence = first.create_sequence("Original name", note="Original note")
+        get_original = first.get_sequence
+        other_field = "note" if field == "name" else "name"
+        armed = True
+
+        def interleave(identifier):
+            nonlocal armed
+            before = get_original(identifier)
+            if armed:
+                armed = False
+                second.update_sequence(identifier, **{other_field: "Changed elsewhere"})
+            return before
+
+        first.get_sequence = interleave
+        result = first.update_sequence(sequence["id"], **{field: "This edit"})
+        assert result[field] == "This edit"
+        assert result[other_field] == "Changed elsewhere"
+
+
+def test_concurrent_first_open_cannot_observe_a_partial_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schema_created = threading.Event()
+    finish_initialization = threading.Event()
+    second_started = threading.Event()
+    connect = sqlite3.connect
+    first = True
+
+    class PausedConnection(sqlite3.Connection):
+        def executescript(self, script):
+            result = super().executescript(script)
+            schema_created.set()
+            assert finish_initialization.wait(timeout=3)
+            return result
+
+    def connect_once(*args, **kwargs):
+        nonlocal first
+        if first:
+            first = False
+            kwargs["factory"] = PausedConnection
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr("latent.workspace.sqlite3.connect", connect_once)
+
+    def open_workspace(*, second=False):
+        if second:
+            second_started.set()
+        with WorkspaceStore(tmp_path) as store:
+            return store.status()["database_integrity"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        opening = executor.submit(open_workspace)
+        try:
+            assert schema_created.wait(timeout=3)
+            overlapping = executor.submit(open_workspace, second=True)
+            assert second_started.wait(timeout=3)
+            # Let the overlapping caller encounter the deliberately incomplete schema.
+            # A serialized initializer waits here instead of rejecting a fresh database.
+            with suppress(TimeoutError):
+                overlapping.result(timeout=0.1)
+        finally:
+            finish_initialization.set()
+        assert opening.result(timeout=3) == "ok"
+        assert overlapping.result(timeout=3) == "ok"
 
 
 def test_workspace_export_is_atomic_and_merge_import_is_non_overwriting(
@@ -218,3 +294,67 @@ def test_workspace_cli_reports_invalid_import_without_traceback(
     assert captured.out == ""
     assert "workspace import failed" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_annotations_survive_migration_and_export(tmp_path: Path) -> None:
+    with WorkspaceStore(tmp_path / "source") as store:
+        store.create_sequence("Keep this")
+        store.connection.execute("UPDATE workspace_meta SET value='1' WHERE key='schema_version'")
+        store.connection.commit()
+    with WorkspaceStore(tmp_path / "source") as store:
+        store.annotate([_asset(1), _asset(2)], rating=4)
+        store.annotate([_asset(1)], caption="Revisit the light")
+        assert store.annotations([_asset(1).identity])[0]["rating"] == 4
+        payload = store.export_payload()
+    with WorkspaceStore(tmp_path / "target") as store:
+        assert store.merge_import(payload).imported == 3
+        assert store.merge_import(payload).unchanged == 3
+        assert store.annotations([_asset(1).identity])[0]["caption"] == "Revisit the light"
+        assert store.list_sequences()[0]["name"] == "Keep this"
+        with pytest.raises(ValueError, match="rating"):
+            store.annotate([_asset(1)], rating=True)
+        legacy = {**payload, "schema_version": 1}
+        del legacy["annotations"]
+        assert store.merge_import(legacy).unchanged == 1
+
+
+def test_flags_migrate_from_v2_and_round_trip_independently_of_stars(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    with sqlite3.connect(source / "workspace.sqlite") as database:
+        database.executescript("""
+            CREATE TABLE workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO workspace_meta VALUES ('schema_version', '2');
+            CREATE TABLE photo_annotations (
+                provider TEXT NOT NULL, remote_path TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                name TEXT NOT NULL, rating INTEGER NOT NULL DEFAULT 0,
+                caption TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider, remote_path)
+            );
+        """)
+        asset = _asset(1)
+        database.execute("INSERT INTO photo_annotations VALUES (?, ?, ?, ?, 4, 'Keep text', 'now')",
+                         (asset.provider, asset.remote_path, asset.fingerprint, asset.name))
+    with WorkspaceStore(source) as workspace:
+        assert workspace.annotations()[0]["flag"] == "unmarked"
+        workspace.annotate([asset], flag="pick")
+        workspace.annotate([asset], flag="unmarked")
+        workspace.annotate([asset], flag="reject")
+        annotation = workspace.annotations()[0]
+        assert (annotation["rating"], annotation["caption"], annotation["flag"]) == (
+            4, "Keep text", "reject"
+        )
+        payload = workspace.export_payload()
+        assert payload["schema_version"] == 5
+        with pytest.raises(ValueError, match="flag"):
+            workspace.annotate([asset], flag="delete")
+    with WorkspaceStore(tmp_path / "restored") as restored:
+        assert restored.merge_import(payload).imported == 1
+        assert restored.annotations()[0] == annotation
+    # Older exports still import as unmarked, with their ratings intact.
+    payload["schema_version"] = 2
+    del payload["annotations"][0]["flag"]
+    with WorkspaceStore(tmp_path / "legacy") as restored:
+        restored.merge_import(payload)
+        assert restored.annotations()[0]["flag"] == "unmarked"
+        assert restored.annotations()[0]["rating"] == 4

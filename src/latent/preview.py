@@ -1,4 +1,4 @@
-"""ARW preview discovery, image normalization, and cache pipeline."""
+"""Bounded archive previews, image normalization, and cache pipeline."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Mapping
@@ -16,6 +17,7 @@ from typing import Any, Protocol
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .errors import ConfigurationError, PreviewDecodeError, PreviewMetadataNotFound
+from .formats import HEIF_EXTENSIONS, PHOTO_EXTENSIONS
 from .models import PipelineResult, PreviewLocation, ProbeResult
 from .provider import RangeSource
 from .storage import CacheManager, StateStore, utc_now
@@ -39,11 +41,18 @@ class ExifToolProbe:
         "ThumbnailOffset",
         "ThumbnailLength",
         "DateTimeOriginal",
+        "SubSecTimeOriginal",
+        "OffsetTimeOriginal",
         "CreateDate",
+        "Make",
         "Model",
         "CameraModelName",
+        "BodySerialNumber",
+        "SerialNumber",
+        "InternalSerialNumber",
         "LensModel",
         "Lens",
+        "LensSerialNumber",
         "Orientation",
         "ISO",
         "FNumber",
@@ -146,13 +155,13 @@ def render_variants(
 
 
 class PreviewPipeline:
-    """Turns one remote RAW into indexed local preview variants."""
+    """Turns an original photo into indexed local preview variants."""
 
     def __init__(
         self,
         store: StateStore,
         cache: CacheManager,
-        probe: PreviewProbe,
+        probe: PreviewProbe | None = None,
         *,
         initial_prefix_bytes: int = 512 * KIB,
         maximum_prefix_bytes: int = 8 * MIB,
@@ -167,18 +176,24 @@ class PreviewPipeline:
         self.maximum_prefix_bytes = maximum_prefix_bytes
         self.maximum_preview_bytes = maximum_preview_bytes
 
-    def run(self, source: RangeSource, *, force: bool = False) -> PipelineResult:
+    def run(
+        self, source: RangeSource, *, force: bool = False, reuse_contact: bool = False
+    ) -> PipelineResult:
         started_at = utc_now()
         started = time.perf_counter()
         requests_before = source.range_requests
         bytes_before = source.bytes_transferred
         asset = source.asset
-        if asset.extension != "arw":
-            raise ConfigurationError("Phase 0 currently accepts Sony ARW files only")
+        if asset.extension not in PHOTO_EXTENSIONS:
+            raise ConfigurationError(
+                "Preview indexing supports ARW, JPEG, HEIF, PNG and TIFF files"
+            )
         asset_id = self.store.upsert_asset(asset)
         if not force:
             preview_hit = self.cache.get(asset_id, "preview", asset.fingerprint)
             contact_hit = self.cache.get(asset_id, "contact", asset.fingerprint)
+            if reuse_contact and contact_hit is not None and preview_hit is None:
+                preview_hit = contact_hit
             if preview_hit is not None and contact_hit is not None:
                 probe_details = self.store.probe_details(asset_id)
                 result = PipelineResult(
@@ -205,14 +220,44 @@ class PreviewPipeline:
                 self.store.record_fetch(result, started_at)
                 return result
 
-        prefix, probe_result = self._read_probe_prefix(source)
+        display_ready = False
+        if asset.extension in {"jpg", "jpeg"} and hasattr(source, "read_preview"):
+            metadata = self._read_jpeg_metadata(source)
+            embedded = source.read_preview(min(self.maximum_preview_bytes, 4 * MIB))
+            probe_result = ProbeResult(
+                PreviewLocation("ProviderPreview", 0, len(embedded)), metadata
+            )
+            display_ready = True
+        elif asset.extension == "arw":
+            prefix, probe_result = self._read_probe_prefix(source)
+        elif asset.extension in HEIF_EXTENSIONS:
+            if asset.size_bytes > 128 * MIB:
+                raise ConfigurationError("This image exceeds the 128 MB preview input limit")
+            original = source.read_range(0, asset.size_bytes)
+            if len(original) != asset.size_bytes:
+                raise PreviewDecodeError("The HEIF original could not be read completely")
+            embedded, metadata = decode_heif(original, asset.extension)
+            probe_result = ProbeResult(
+                PreviewLocation("HEIFImage", 0, len(embedded)), metadata
+            )
+            display_ready = True
+        else:
+            if asset.size_bytes > 128 * MIB:
+                raise ConfigurationError("This image exceeds the 128 MB preview input limit")
+            prefix = source.read_range(0, asset.size_bytes)
+            with Image.open(io.BytesIO(prefix)) as original:
+                metadata = _image_metadata(original)
+            probe_result = ProbeResult(PreviewLocation("OriginalImage", 0, len(prefix)), metadata)
         location = probe_result.location
-        if location.length > self.maximum_preview_bytes:
+        if asset.extension == "arw" and location.length > self.maximum_preview_bytes:
             raise PreviewMetadataNotFound(
                 "embedded preview exceeds the configured bounded-download limit"
             )
-        embedded = self._read_preview(source, prefix, location)
-        rendered = render_variants(embedded, probe_result.metadata)
+        if not display_ready:
+            embedded = self._read_preview(source, prefix, location)
+        # Provider thumbnails already have their display orientation applied.
+        # Keep the original EXIF in the catalog without rotating the thumbnail twice.
+        rendered = render_variants(embedded, {} if display_ready else probe_result.metadata)
         preview_entry, preview_evicted = self.cache.put(
             asset_id=asset_id,
             variant="preview",
@@ -260,7 +305,29 @@ class PreviewPipeline:
         self.store.record_fetch(result, started_at)
         return result
 
+    @staticmethod
+    def _read_jpeg_metadata(source: RangeSource) -> dict[str, Any]:
+        """Read JPEG/MPO EXIF from a small header without decoding original pixels."""
+        maximum = min(source.asset.size_bytes, 512 * KIB)
+        target = min(maximum, 64 * KIB)
+        prefix = b""
+        while True:
+            prefix += source.read_range(len(prefix), target - len(prefix))
+            try:
+                with Image.open(io.BytesIO(prefix)) as original:
+                    if original.format not in {"JPEG", "MPO"}:
+                        raise ConfigurationError("The JPEG file does not contain JPEG image data")
+                    return _image_metadata(original)
+            except (UnidentifiedImageError, OSError, ValueError) as error:
+                if target >= maximum:
+                    raise PreviewMetadataNotFound(
+                        "JPEG metadata was not readable within the 512 KiB header limit"
+                    ) from error
+                target = min(maximum, target * 2)
+
     def _read_probe_prefix(self, source: RangeSource) -> tuple[bytes, ProbeResult]:
+        if self.probe is None:
+            self.probe = ExifToolProbe()
         asset_size = source.asset.size_bytes
         maximum = min(asset_size, self.maximum_prefix_bytes)
         target = min(asset_size, self.initial_prefix_bytes)
@@ -289,6 +356,55 @@ class PreviewPipeline:
             remainder = source.read_range(len(prefix), preview_end - len(prefix))
             return available + remainder
         return source.read_range(location.offset, location.length)
+
+
+def _image_metadata(image: Image.Image) -> dict[str, Any]:
+    """Retain shooting identity/timing from EXIF already present in the bounded header."""
+    exif = image.getexif()
+    details = exif.get_ifd(34665)
+    metadata = {
+        name: details.get(tag) for name, tag in (
+            ("DateTimeOriginal", 36867), ("SubSecTimeOriginal", 37521),
+            ("OffsetTimeOriginal", 36881), ("BodySerialNumber", 42033),
+            ("LensModel", 42036), ("LensSerialNumber", 42037),
+            ("ExposureTime", 33434), ("FNumber", 33437),
+            ("ISO", 34855), ("FocalLength", 37386),
+        )
+    }
+    metadata.update({
+        "Make": exif.get(271), "Model": exif.get(272), "Orientation": exif.get(274),
+        "Software": exif.get(305), "ImageWidth": image.width, "ImageHeight": image.height,
+    })
+    return metadata
+
+
+def decode_heif(data: bytes, extension: str) -> tuple[bytes, dict[str, Any]]:
+    """Decode a bounded local HEIF copy through macOS ImageIO, retaining original EXIF."""
+    if sys.platform != "darwin":
+        raise ConfigurationError("HEIF previews currently require macOS ImageIO")
+    exiftool = shutil.which("exiftool")
+    if exiftool is None:
+        raise ConfigurationError("ExifTool is required to read HEIF shooting metadata")
+    with tempfile.TemporaryDirectory(prefix="latent-heif-") as directory:
+        original = Path(directory) / f"original.{extension}"
+        preview = Path(directory) / "preview.jpg"
+        original.write_bytes(data)
+        converted = subprocess.run(
+            ["/usr/bin/sips", "-s", "format", "jpeg", "-Z", "2560", str(original),
+             "--out", str(preview)],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+        if converted.returncode or not preview.is_file():
+            raise PreviewDecodeError("macOS could not decode this HEIF photo")
+        result = subprocess.run(
+            [exiftool, "-j", "-n", *(f"-{tag}" for tag in ExifToolProbe.TAGS),
+             "-ImageWidth", "-ImageHeight", str(original)],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+        metadata = json.loads(result.stdout)[0]
+        metadata.pop("SourceFile", None)
+        # ImageIO applies display orientation; original EXIF is stored separately.
+        return preview.read_bytes(), metadata
 
 
 def _encode_jpeg(image: Image.Image, *, quality: int, icc_profile: bytes | None) -> EncodedImage:
@@ -330,4 +446,4 @@ def _positive_int(value: object, *, allow_zero: bool) -> int | None:
 
 
 def _elapsed_ms(started: float) -> int:
-    return max(0, round((time.perf_counter() - started) * 1000))
+        return max(0, round((time.perf_counter() - started) * 1000))

@@ -6,7 +6,7 @@ import plistlib
 import re
 import time
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -81,7 +81,31 @@ class CloudDriveRangeSource:
             raise ConfigurationError(
                 f"expected a file but received a directory: {self.remote_path}"
             )
+        # Signed provider URLs stay in memory and never enter the catalog or logs.
+        self._preview_url = str(remote.previewUrl or remote.thumbnailUrl)
         return _remote_asset(remote, self.remote_path)
+
+    def read_preview(self, maximum_bytes: int) -> bytes:
+        """Read the provider's display-ready preview, never the original download URL."""
+        if maximum_bytes <= 0:
+            raise ValueError("preview byte limit must be positive")
+        url = self._preview_url
+        if not url or urlsplit(url).scheme not in {"http", "https"}:
+            raise ConfigurationError("CloudDrive did not provide a photo preview URL")
+        request = Request(url, headers={"Accept-Encoding": "identity"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            if response.status != 200:
+                raise ArchiveSafetyError("CloudDrive preview returned an unexpected status")
+            length = response.headers.get("Content-Length")
+            if length is not None and int(length) > maximum_bytes:
+                raise ArchiveSafetyError("CloudDrive preview exceeds the download limit")
+            body = response.read(maximum_bytes + 1)
+        self.bytes_transferred += len(body)
+        if len(body) > maximum_bytes:
+            raise ArchiveSafetyError("CloudDrive preview exceeds the download limit")
+        if length is not None and len(body) != int(length):
+            raise ArchiveSafetyError("CloudDrive preview response was incomplete")
+        return body
 
     def read_range(self, start: int, length: int) -> bytes:
         if start < 0 or length <= 0:
@@ -220,6 +244,45 @@ class CloudDriveCatalog:
             directories=tuple(directories),
             assets=tuple(assets),
         )
+
+
+def cloud_folder_identity(path: Path, mount_point: Path) -> dict:
+    """Resolve a mounted folder to its stable CloudDrive identity without reading files."""
+    from google.protobuf.empty_pb2 import Empty
+    from grpc import RpcError
+
+    client = CloudDriveCatalog()._client()
+    try:
+        mounts = client.stub.GetMountPoints(
+            Empty(), metadata=client._create_authorized_metadata(), timeout=10
+        )
+        mount = next(
+            (item for item in mounts.mountPoints
+             if item.isMounted and item.localMount and item.mountPoint == str(mount_point)),
+            None,
+        )
+        if mount is None or not mount.sourceDir:
+            raise ConfigurationError("CloudDrive has not confirmed this mounted folder")
+        remote_path = str(PurePosixPath(mount.sourceDir) / path.relative_to(mount_point))
+        # Use the same bounded RPC as the client helper, rather than an unbounded call.
+        from clouddrive2_client.proto import clouddrive_pb2
+
+        remote = client.stub.FindFileByPath(
+            clouddrive_pb2.FindFileByPathRequest(parentPath="", path=remote_path),
+            metadata=client._create_authorized_metadata(), timeout=10,
+        )
+        if not remote.isDirectory or not remote.id:
+            raise ConfigurationError("CloudDrive has not confirmed this folder's identity")
+        return {
+            "mount_point": str(mount_point), "source_root": mount.sourceDir,
+            "remote_path": remote_path, "remote_id": str(remote.id),
+        }
+    except RpcError as error:
+        raise ConfigurationError(
+            "CloudDrive could not verify this folder. Check its connection and retry"
+        ) from error
+    finally:
+        client.close()
 
 
 class MemoryRangeSource:

@@ -1,35 +1,64 @@
-"""Archive-read-only HTTP shell for Library discovery and local workspace edits."""
+"""Local library discovery, durable workspace edits, and explicit cloud editing transfers."""
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
+import math
 import mimetypes
 import re
+import sys
 import threading
+from datetime import date
+from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
+from uuid import UUID
 
 from .curator import build_grounded_curator_report, build_grounded_motif_report
+from .editing import DEFAULT_EDITING_DIR, EditingManager
+from .embedding_runs import EmbeddingRuns
+from .embeddings import EmbeddingStore
 from .errors import ConfigurationError
+from .filters import matching_ids, photo_filters
 from .gemini import GEMINI_STORE_NAME, GeminiEmbeddingEncoder
+from .imports import ImportManager
+from .ingest import FolderIndexer
+from .locations import LocationsStore
 from .search import SemanticSearch, VectorIndex
+from .search_history import SearchHistory
+from .sequence_links import SequenceLinks
+from .service_runtime import service_identity, workspace_service_lease
 from .storage import StateStore
+from .timelapse_groups import TimelapseGroups
+from .trash import PhotoTrash
 from .workspace import DEFAULT_WORKSPACE_DIR, WorkspaceAsset, WorkspaceStore
 
-_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_PATTERN = re.compile(r"^[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?$")
 _MAX_SEARCH_LENGTH = 200
+_SEARCH_HISTORY_PATH = re.compile(r"^/api/search/history/([0-9a-f]{64})(?:/(image|replay))?$")
 _STATIC_FILES = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js"}
 _SIMILAR_PATH = re.compile(r"^/api/assets/(\d+)/similar$")
 _CURATOR_PATH = re.compile(r"^/api/assets/(\d+)/curator$")
 _SEQUENCE_PATH = re.compile(r"^/api/sequences/([^/]+)$")
+_SEQUENCE_FOLDER_PATH = re.compile(r"^/api/sequence-folders/([^/]+)$")
 _SEQUENCE_ITEMS_PATH = re.compile(r"^/api/sequences/([^/]+)/items$")
 _SEQUENCE_ORDER_PATH = re.compile(r"^/api/sequences/([^/]+)/items/order$")
 _SEQUENCE_ITEM_PATH = re.compile(r"^/api/sequences/([^/]+)/items/([^/]+)$")
+_EDIT_BATCH_PATH = re.compile(
+    r"^/api/editing/([a-f0-9-]+)(?:/(resume|prepare|finish|map|verify))?$"
+)
+_TRASH_PATH = re.compile(r"^/api/trash/([a-f0-9-]+)/(restore|resume)$")
+_TIMELAPSE_PATH = re.compile(r"^/api/timelapse/([a-f0-9]{64})$")
+_IMPORT_PATH = re.compile(
+    r"^/api/imports/([a-f0-9-]+)/(start|resume|pause|destination|archive|retry_previews)$"
+)
+_EMBEDDING_RUN_PATH = re.compile(r"^/api/embedding-runs/([a-f0-9-]+)/(start|resume|pause)$")
 _MAX_JSON_BODY_BYTES = 64 * 1024
 
 
@@ -46,6 +75,7 @@ class LibraryServer(ThreadingHTTPServer):
         semantic_search: SemanticSearch | None = None,
         embedding_dir: Path | None = None,
         workspace_dir: Path | None = None,
+        editing_dir: Path | None = None,
     ) -> None:
         self.state_dir = state_dir.expanduser().resolve()
         self.cache_root = (self.state_dir / "cache").resolve()
@@ -61,9 +91,45 @@ class LibraryServer(ThreadingHTTPServer):
             else self.state_dir / "embeddings" / GEMINI_STORE_NAME
         )
         self.vector_index = vector_index or VectorIndex(resolved_embedding_dir)
+        self.service_info = service_identity(
+            self.state_dir, self.vector_index.embedding_dir, self.workspace_dir
+        )
+        self.search_history = SearchHistory(
+            self.workspace_dir / "search-history.sqlite", library_id=self.service_info["data_id"],
+            model_id=self.vector_index.model_id, dimensions=self.vector_index.dimensions,
+        )
         self._semantic_search = semantic_search
         self._semantic_lock = threading.Lock()
         super().__init__(address, LibraryRequestHandler)
+        try:
+            self.locations = LocationsStore(self.workspace_dir, self.state_dir)
+            self.sequence_links = SequenceLinks(self.locations)
+            self.editing = EditingManager(
+                self.workspace_dir, files_dir=editing_dir, locations=self.locations
+            )
+            self.trash = PhotoTrash(self.locations)
+            self.imports = ImportManager(self.locations)
+            self.folder_indexer = FolderIndexer(self.locations, self.imports)
+            self.embedding_runs = EmbeddingRuns(
+                self.state_dir, self.vector_index.embedding_dir, self.workspace_dir,
+                model_id=self.vector_index.model_id, dimensions=self.vector_index.dimensions,
+            )
+        except Exception:
+            super().server_close()
+            raise
+
+    def server_close(self) -> None:
+        if imports := getattr(self, "imports", None):
+            imports.close()
+        if embeddings := getattr(self, "embedding_runs", None):
+            embeddings.close()
+        if trash := getattr(self, "trash", None):
+            trash.close()
+        if indexer := getattr(self, "folder_indexer", None):
+            indexer.close()
+        if editing := getattr(self, "editing", None):
+            editing.close()
+        super().server_close()
 
     def get_semantic_search(self) -> SemanticSearch:
         if self._semantic_search is not None:
@@ -76,6 +142,60 @@ class LibraryServer(ThreadingHTTPServer):
                 )
         return self._semantic_search
 
+    def embedding_progress(self, *, total_assets: int | None = None) -> dict[str, object]:
+        with StateStore(self.state_dir) as store:
+            hidden_ids = [
+                int(row[0])
+                for row in store.connection.execute(
+                    "SELECT a.id FROM assets a JOIN hidden_assets h "
+                    "ON h.provider=a.provider AND h.remote_path=a.remote_path"
+                )
+            ]
+        if total_assets is None:
+            with StateStore(self.state_dir) as store:
+                total_assets = store.library_asset_count()
+        index = self.vector_index
+        progress = {
+            "queued_assets": 0,
+            "indexed_assets": 0,
+            "stale_jobs": 0,
+            "jobs": dict.fromkeys(("pending", "running", "succeeded", "failed"), 0),
+        }
+        unavailable = False
+        if (index.embedding_dir / "index.sqlite").is_file():
+            try:
+                with EmbeddingStore(
+                    index.embedding_dir, model_id=index.model_id, dimensions=index.dimensions
+                ) as store:
+                    progress = store.progress(exclude_asset_ids=hidden_ids)
+            except ConfigurationError:
+                unavailable = True
+        jobs = progress["jobs"]
+        indexed = progress["indexed_assets"]
+        total_assets = max(total_assets, progress["queued_assets"])
+        if unavailable:
+            phase = "unavailable"
+        elif total_assets > 0 and indexed == total_assets:
+            phase = "complete"
+        elif jobs["running"] > progress["stale_jobs"]:
+            phase = "indexing"
+        elif progress["stale_jobs"] or jobs["failed"]:
+            phase = "needs_attention"
+        elif progress["queued_assets"]:
+            phase = "paused"
+        else:
+            phase = "not_started"
+        return {
+            **progress,
+            "total_assets": total_assets,
+            "remaining_assets": max(0, total_assets - indexed),
+            "phase": phase,
+            "semantic_ready": indexed > 0,
+            "model_id": index.model_id,
+            "dimensions": index.dimensions,
+            "provider": "gemini_api",
+        }
+
 
 class LibraryRequestHandler(BaseHTTPRequestHandler):
     server: LibraryServer
@@ -86,19 +206,56 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             if parsed.path in _STATIC_FILES:
                 self._serve_static(_STATIC_FILES[parsed.path])
             elif parsed.path == "/health":
-                self._send_json({"status": "ok", "cloud_access": False})
+                self._send_json(self.server.service_info)
             elif parsed.path == "/api/library":
                 self._serve_library()
+            elif parsed.path == "/api/embedding-status":
+                self._send_json({**self.server.embedding_progress(), "cloud_access": False})
             elif parsed.path == "/api/assets":
                 self._serve_assets(parse_qs(parsed.query))
+            elif parsed.path == "/api/timelapse":
+                self._serve_timelapse()
+            elif parsed.path == "/api/starred":
+                self._serve_starred(parse_qs(parsed.query))
             elif parsed.path == "/api/search":
                 self._serve_semantic_search(parse_qs(parsed.query))
+            elif parsed.path == "/api/search/history":
+                self._require_search_access()
+                self._send_json({"entries": self.server.search_history.list()})
+            elif match := _SEARCH_HISTORY_PATH.fullmatch(parsed.path):
+                self._require_search_access()
+                if match.group(2) != "image":
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_bytes(self.server.search_history.image(match.group(1)), "image/jpeg")
             elif match := _SIMILAR_PATH.fullmatch(parsed.path):
                 self._serve_similar(int(match.group(1)), parse_qs(parsed.query))
             elif match := _CURATOR_PATH.fullmatch(parsed.path):
                 self._serve_curator(int(match.group(1)), parse_qs(parsed.query))
             elif parsed.path == "/api/curator/motifs":
                 self._serve_curator_motifs(parse_qs(parsed.query))
+            elif parsed.path == "/api/editing":
+                self._send_json({"batches": self.server.editing.batches()})
+            elif parsed.path == "/api/trash":
+                self._send_json({"batches": self.server.trash.batches()})
+            elif parsed.path == "/api/locations":
+                self._send_json(self._locations_payload())
+            elif parsed.path == "/api/imports":
+                self._send_json(
+                    {
+                        "batches": self.server.imports.batches(),
+                        "data_id": self.server.service_info["data_id"],
+                    }
+                )
+            elif parsed.path == "/api/embedding-runs":
+                self._send_json(
+                    {
+                        "runs": self.server.embedding_runs.runs(),
+                        "data_id": self.server.service_info["data_id"],
+                    }
+                )
+            elif match := _EDIT_BATCH_PATH.fullmatch(parsed.path):
+                self._send_json({"batch": self.server.editing.get(match.group(1))})
             elif parsed.path == "/api/sequences":
                 self._serve_sequences()
             elif match := _SEQUENCE_PATH.fullmatch(parsed.path):
@@ -134,7 +291,223 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         try:
             if not self.server.workspace_writes_enabled:
                 raise PermissionError("workspace mutations are disabled on non-loopback binds")
-            if method == "POST" and parsed.path == "/api/sequences":
+            host = self.headers.get("Host", "")
+            if not _is_loopback(urlsplit("http://" + host).hostname or ""):
+                raise PermissionError("editing and workspace requests require a loopback Host")
+            origin = self.headers.get("Origin")
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                origin and origin != f"http://{host}"
+            ):
+                raise PermissionError("cross-site workspace and editing requests are disabled")
+            if method == "POST" and parsed.path == "/api/search/image":
+                self._serve_image_search(self._read_json_body(maximum=2 * 1024 * 1024))
+            elif match := _SEARCH_HISTORY_PATH.fullmatch(parsed.path):
+                identifier, action = match.groups()
+                if method == "POST" and action == "replay":
+                    self._replay_search(identifier, self._read_json_body())
+                elif method == "DELETE" and action is None:
+                    payload = self._read_json_body()
+                    _validate_json_keys(
+                        payload, allowed={"expected_data_id"}, required={"expected_data_id"}
+                    )
+                    self._validate_workspace_identity(payload)
+                    self.server.search_history.delete(identifier)
+                    self._send_json({"deleted": identifier})
+                else:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+            elif method == "POST" and (
+                parsed.path == "/api/imports" or _IMPORT_PATH.fullmatch(parsed.path)
+            ):
+                payload = self._read_json_body()
+                self._validate_workspace_identity(payload)
+                with self.server.locations.lock:
+                    if self.server.trash.busy:
+                        raise ValueError("Wait for the photo move to finish before importing")
+                    if parsed.path == "/api/imports":
+                        _validate_json_keys(
+                            payload,
+                            allowed={"expected_data_id", "request_id", "paths"},
+                            required={"expected_data_id", "request_id", "paths"},
+                        )
+                        result = self.server.imports.prepare(
+                            payload["request_id"],
+                            _string_list(payload["paths"], "paths", maximum=16),
+                        )
+                    else:
+                        _validate_json_keys(
+                            payload,
+                            allowed={"expected_data_id", "expected_revision", "path"},
+                            required={"expected_data_id", "expected_revision"},
+                        )
+                        match = _IMPORT_PATH.fullmatch(parsed.path)
+                        result = self.server.imports.action(
+                            match.group(1),
+                            match.group(2),
+                            payload["expected_revision"],
+                            payload.get("path"),
+                        )
+                self._send_json({"batch": result, "data_id": self.server.service_info["data_id"]})
+            elif method == "POST" and (
+                parsed.path == "/api/embedding-runs" or _EMBEDDING_RUN_PATH.fullmatch(parsed.path)
+            ):
+                payload = self._read_json_body()
+                self._validate_workspace_identity(payload)
+                with self.server.locations.lock:
+                    if self.server.trash.busy:
+                        raise ValueError("Wait for the photo move before generating embeddings")
+                    if parsed.path == "/api/embedding-runs":
+                        _validate_json_keys(
+                            payload,
+                            allowed={
+                                "expected_data_id",
+                                "request_id",
+                                "scope",
+                                "asset_ids",
+                                "batch_id",
+                            },
+                            required={"expected_data_id", "request_id", "scope"},
+                        )
+                        ids = (
+                            _integer_list(payload["asset_ids"], "asset_ids", maximum=5000)
+                            if payload.get("asset_ids") is not None
+                            else None
+                        )
+                        batch_id = payload.get("batch_id")
+                        if payload["scope"] == "import":
+                            if ids is not None:
+                                raise ValueError("Import scope uses its recorded batch photos")
+                            ids = self.server.imports.asset_ids(batch_id)
+                        elif batch_id is not None:
+                            raise ValueError("Only import scope accepts a batch ID")
+                        result = self.server.embedding_runs.prepare(
+                            payload["request_id"], payload["scope"], ids, batch_id=batch_id
+                        )
+                    else:
+                        _validate_json_keys(
+                            payload,
+                            allowed={"expected_data_id", "expected_revision"},
+                            required={"expected_data_id", "expected_revision"},
+                        )
+                        match = _EMBEDDING_RUN_PATH.fullmatch(parsed.path)
+                        result = self.server.embedding_runs.action(
+                            match.group(1), match.group(2), payload["expected_revision"]
+                        )
+                self._send_json({"run": result, "data_id": self.server.service_info["data_id"]})
+            elif method == "POST" and parsed.path == "/api/timelapse/audit":
+                payload = self._read_json_body()
+                _validate_json_keys(
+                    payload,
+                    allowed={"expected_data_id"},
+                    required={"expected_data_id"},
+                )
+                self._validate_workspace_identity(payload)
+                with TimelapseGroups(self.server.workspace_dir) as groups:
+                    audit = groups.audit(self.server.state_dir)
+                self._serve_timelapse(audit=audit)
+            elif method == "PATCH" and (match := _TIMELAPSE_PATH.fullmatch(parsed.path)):
+                payload = self._read_json_body()
+                fields = {"expected_data_id", "expected_revision", "confirmed"}
+                _validate_json_keys(payload, allowed=fields, required=fields)
+                self._validate_workspace_identity(payload)
+                with TimelapseGroups(self.server.workspace_dir) as groups:
+                    groups.set_confirmed(
+                        self.server.state_dir, match.group(1), confirmed=payload["confirmed"],
+                        expected_revision=payload["expected_revision"],
+                    )
+                self._serve_timelapse()
+            elif method == "POST" and parsed.path in {
+                "/api/locations",
+                "/api/locations/scan",
+                "/api/locations/cancel",
+                "/api/locations/sequence-links",
+            }:
+                payload = self._read_json_body()
+                _validate_json_keys(
+                    payload,
+                    allowed={
+                        "action",
+                        "path",
+                        "source_id",
+                        "expected_revision",
+                        "expected_data_id",
+                    },
+                    required={"expected_revision", "expected_data_id"},
+                )
+                self._validate_workspace_identity(payload)
+                with self.server.locations.lock:
+                    if self.server.trash.busy:
+                        raise ValueError(
+                            "Wait for the photo move to finish before changing locations"
+                        )
+                    if parsed.path == "/api/locations":
+                        if self.server.imports.busy:
+                            raise ValueError("Pause the active import before changing locations")
+                        self.server.locations.update(payload)
+                    elif parsed.path.endswith("/scan"):
+                        self.server.folder_indexer.start(payload["expected_revision"])
+                    elif parsed.path.endswith("/cancel"):
+                        self.server.folder_indexer.cancel()
+                    else:
+                        result = self.server.sequence_links.sync(payload["expected_revision"])
+                        self._send_json({**self._locations_payload(), "sequence_result": result})
+                        return
+                self._send_json(self._locations_payload())
+            elif method == "POST" and parsed.path == "/api/trash":
+                self._trash_photos(self._read_json_body())
+            elif method == "POST" and (match := _TRASH_PATH.fullmatch(parsed.path)):
+                payload = self._read_json_body()
+                _validate_json_keys(
+                    payload, allowed={"expected_data_id"}, required={"expected_data_id"}
+                )
+                self._validate_workspace_identity(payload)
+                self._check_photo_moves_available()
+                batch = self.server.trash.action(
+                    match.group(1), restore=match.group(2) == "restore"
+                )
+                self._send_json({"batch": batch})
+            elif method == "POST" and parsed.path == "/api/editing":
+                if self.server.trash.busy:
+                    raise ValueError("Wait for the photo move to finish before editing")
+                payload = self._read_json_body()
+                _validate_json_keys(payload, allowed={"asset_ids"}, required={"asset_ids"})
+                self._send_json(
+                    {"batch": self.server.editing.create(self._editing_records(payload))},
+                    status=HTTPStatus.CREATED,
+                )
+            elif method == "POST" and (match := _EDIT_BATCH_PATH.fullmatch(parsed.path)):
+                payload = self._read_json_body()
+                identifier, action = match.groups()
+                _validate_json_keys(
+                    payload,
+                    allowed=(
+                        {"cleanup_policy", "exports"}
+                        if action == "finish"
+                        else {"exports"}
+                        if action == "map"
+                        else set()
+                    )
+                    | {"expected_data_id", "expected_updated_at"},
+                )
+                self._validate_workspace_identity(payload)
+                batch = self.server.editing.apply_action(
+                    identifier,
+                    action,
+                    policy=payload.get("cleanup_policy", ""),
+                    expected_updated_at=payload.get("expected_updated_at"),
+                    exports=payload.get("exports"),
+                )
+                self._send_json({"batch": batch})
+            elif method == "PATCH" and parsed.path == "/api/annotations":
+                self._annotate(self._read_json_body())
+            elif method == "POST" and parsed.path == "/api/sequence-folders":
+                self._create_sequence_folder(self._read_json_body())
+            elif method in {"PATCH", "DELETE"} and (
+                match := _SEQUENCE_FOLDER_PATH.fullmatch(parsed.path)
+            ):
+                self._change_sequence_folder(
+                    unquote(match.group(1)), self._read_json_body(), remove=method == "DELETE"
+                )
+            elif method == "POST" and parsed.path == "/api/sequences":
                 self._create_sequence(self._read_json_body())
             elif method == "POST" and (match := _SEQUENCE_ITEMS_PATH.fullmatch(parsed.path)):
                 self._add_sequence_items(unquote(match.group(1)), self._read_json_body())
@@ -148,7 +521,10 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                     unquote(match.group(2)),
                 )
             elif method == "DELETE" and (match := _SEQUENCE_PATH.fullmatch(parsed.path)):
-                self._delete_sequence(unquote(match.group(1)))
+                payload = (
+                    self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}
+                )
+                self._delete_sequence(unquote(match.group(1)), payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except (
@@ -180,6 +556,13 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return None
 
+    def _locations_payload(self) -> dict:
+        return {
+            **self.server.locations.get(),
+            "indexing": self.server.folder_indexer.status(),
+            "data_id": self.server.service_info["data_id"],
+        }
+
     def _serve_static(self, name: str) -> None:
         resource = files("latent").joinpath("web_assets", name)
         data = resource.read_bytes()
@@ -190,21 +573,15 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         with StateStore(self.server.state_dir) as store:
             dates = store.library_dates()
             jobs = store.preview_job_counts()
+            cached_assets = store.library_asset_count()
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             workspace_status = workspace.status()
-        try:
-            indexed_assets = self.server.vector_index.size
-        except ConfigurationError:
-            indexed_assets = 0
         self._send_json(
             {
                 "dates": dates,
-                "cached_assets": sum(int(item["asset_count"]) for item in dates),
+                "cached_assets": cached_assets,
                 "preview_jobs": jobs,
-                "embedding_index": {
-                    "indexed_assets": indexed_assets,
-                    "semantic_ready": indexed_assets > 0,
-                },
+                "embedding_index": self.server.embedding_progress(total_assets=cached_assets),
                 "workspace": {
                     "sequences": workspace_status["sequences"],
                     "items": workspace_status["items"],
@@ -214,27 +591,67 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _serve_timelapse(self, *, audit: dict | None = None) -> None:
+        with TimelapseGroups(self.server.workspace_dir) as store:
+            groups = store.list(self.server.state_dir)
+        ids = [g["cover_asset_id"] for g in groups if g["cover_asset_id"] is not None]
+        with StateStore(self.server.state_dir) as catalog:
+            covers = {a["id"]: a for a in self._annotated_payloads(
+                catalog.library_assets_by_ids(ids),
+            )}
+        self._send_json({
+            "groups": [{**g, "cover": covers.get(g["cover_asset_id"])} for g in groups],
+            "audit": audit, "archive_modified": False, "cloud_access": False,
+        })
+
     def _serve_assets(self, query: dict[str, list[str]]) -> None:
+        filters = self._query_filters(query)
         capture_date = _single(query, "date")
-        if capture_date is not None and _DATE_PATTERN.fullmatch(capture_date) is None:
-            raise ValueError("date must use YYYY-MM-DD")
+        if capture_date is not None:
+            if _DATE_PATTERN.fullmatch(capture_date) is None:
+                raise ValueError("date must use YYYY, YYYY-MM, or YYYY-MM-DD")
+            parts = [int(part) for part in capture_date.split("-")]
+            date(*(parts + [1] * (3 - len(parts))))
         search_query = (_single(query, "q") or "").strip()
         if len(search_query) > _MAX_SEARCH_LENGTH:
             raise ValueError(f"search query must be {_MAX_SEARCH_LENGTH} characters or fewer")
         limit = _bounded_int(_single(query, "limit"), default=250, minimum=1, maximum=500)
         offset = _bounded_int(_single(query, "offset"), default=0, minimum=0, maximum=100_000)
+        collapsed = _single(query, "collapse_timelapses")
+        if collapsed not in {None, "0", "1"}:
+            raise ValueError("collapse_timelapses must be 0 or 1")
+        group_id = _single(query, "timelapse_group")
+        badges: dict[int, dict] = {}
+        expanded_total = None
         with StateStore(self.server.state_dir) as store:
+            allowed = matching_ids(store, self.server.workspace_dir, filters) if filters else None
+            if import_id := _single(query, "import_id"):
+                imported = set(self.server.imports.asset_ids(import_id))
+                allowed = list(imported if allowed is None else imported.intersection(allowed))
+            if collapsed == "1" or group_id is not None:
+                ordered = store.library_asset_ids(
+                    allowed_asset_ids=allowed, capture_date=capture_date,
+                    search_query=search_query or None,
+                )
+                with TimelapseGroups(self.server.workspace_dir) as groups:
+                    allowed, badges = groups.presentation(store, ordered, group_id=group_id)
+                expanded_total = len(ordered) if group_id is None else len(allowed)
             assets = store.library_assets(
+                allowed_asset_ids=allowed,
                 capture_date=capture_date,
                 search_query=search_query or None,
                 limit=limit,
                 offset=offset,
             )
             total = store.library_asset_count(
+                allowed_asset_ids=allowed,
                 capture_date=capture_date,
                 search_query=search_query or None,
             )
-        payload = [self._asset_payload(asset) for asset in assets]
+        payload = self._annotated_payloads(assets)
+        for asset in payload:
+            if badge := badges.get(asset["id"]):
+                asset["timelapse"] = badge
         next_offset = offset + len(payload)
         has_more = next_offset < total
         self._send_json(
@@ -244,9 +661,177 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 "limit": limit,
                 "offset": offset,
                 "total": total,
+                "expanded_total": expanded_total,
                 "has_more": has_more,
                 "next_offset": next_offset if has_more else None,
                 "assets": payload,
+                "cloud_access": False,
+            }
+        )
+
+    @staticmethod
+    def _query_filters(query: dict[str, list[str]]) -> dict:
+        return photo_filters(
+            {
+                key: _single(query, key)
+                for key in ("date_from", "date_to", "rating_min", "starred", "flag")
+                if key in query
+            }
+        )
+
+    def _matching_ids(self, filters: dict) -> list[int]:
+        with StateStore(self.server.state_dir) as store:
+            return matching_ids(store, self.server.workspace_dir, filters)
+
+    def _annotated_payloads(self, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            annotations = workspace.annotations(
+                [(asset["provider"], asset["remote_path"]) for asset in assets]
+            )
+        by_identity = {(a["provider"], a["remote_path"]): a for a in annotations}
+        result = []
+        for asset in assets:
+            annotation = by_identity.get((asset["provider"], asset["remote_path"]), {})
+            result.append(
+                {
+                    **self._asset_payload(asset),
+                    "rating": annotation.get("rating", 0),
+                    "caption": annotation.get("caption", ""),
+                    "flag": annotation.get("flag", "unmarked"),
+                }
+            )
+        return result
+
+    def _selected_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        ids = _integer_list(payload["asset_ids"], "asset_ids", maximum=500)
+        if not ids:
+            raise ValueError("select at least one photo")
+        with StateStore(self.server.state_dir) as store:
+            records = store.library_assets_by_ids(ids)
+        if len(records) != len(ids):
+            raise KeyError("one or more selected photos are missing from the library")
+        return records
+
+    def _editing_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        records = self._selected_records(payload)
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            annotations = workspace.annotations(
+                [(r["provider"], r["remote_path"]) for r in records]
+            )
+        by_identity = {(a["provider"], a["remote_path"]): a for a in annotations}
+        return [
+            {**record, "annotation": by_identity.get((record["provider"], record["remote_path"]))}
+            for record in records
+        ]
+
+    def _check_photo_moves_available(self) -> None:
+        if (self.server.imports.busy
+                or self.server.embedding_runs.busy
+                or (self.server.editing.worker is not None
+                    and self.server.editing.worker.is_alive())):
+            raise ValueError(
+                "Pause imports or embedding generation, or wait for the editing transfer, "
+                "before moving originals"
+            )
+
+    def _trash_photos(self, payload: dict) -> None:
+        _validate_json_keys(
+            payload,
+            allowed={"request_id", "asset_ids", "expected"},
+            required={"request_id", "asset_ids", "expected"},
+        )
+        self._check_photo_moves_available()
+        try:
+            previous = self.server.trash.get(payload["request_id"])
+        except KeyError:
+            previous = None
+        records = previous["items"] if previous else self._selected_records(payload)
+        if set(_integer_list(payload["asset_ids"], "asset_ids", maximum=500)) != {
+            r["id"] for r in records
+        }:
+            raise ValueError("Trash request photos changed")
+        self._validate_annotation_targets(payload["expected"], records)
+        batch = self.server.trash.create(payload["request_id"], records)
+        self._send_json({"batch": batch})
+
+    def _annotate(self, payload: dict[str, Any]) -> None:
+        _validate_json_keys(
+            payload,
+            allowed={"asset_ids", "rating", "caption", "flag", "expected"},
+            required={"asset_ids"},
+        )
+        records = self._selected_records(payload)
+        if "expected" in payload:
+            self._validate_annotation_targets(payload["expected"], records)
+        assets = [
+            WorkspaceAsset(
+                provider=r["provider"],
+                remote_path=r["remote_path"],
+                fingerprint=r["fingerprint"],
+                name=r["name"],
+            )
+            for r in records
+        ]
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            workspace.annotate(
+                assets,
+                rating=payload.get("rating"),
+                caption=payload.get("caption"),
+                flag=payload.get("flag"),
+            )
+        self._send_json({"assets": self._annotated_payloads(records), "archive_modified": False})
+
+    def _validate_annotation_targets(self, expected: object, records: list[dict[str, Any]]) -> None:
+        if not isinstance(expected, dict):
+            raise ValueError("expected must identify the library and selected photos")
+        _validate_json_keys(expected, allowed={"data_id", "assets"}, required={"data_id", "assets"})
+        if expected["data_id"] != self.server.service_info["data_id"]:
+            raise ValueError("Pending edits belong to another library; no annotations were changed")
+        targets = expected["assets"]
+        if not isinstance(targets, list) or len(targets) != len(records):
+            raise ValueError("expected assets must identify every selected photo")
+        fields = {"id", "provider", "remote_path", "fingerprint"}
+        by_id = {record["id"]: record for record in records}
+        seen = set()
+        for target in targets:
+            if not isinstance(target, dict):
+                raise ValueError("expected assets must be photo identities")
+            _validate_json_keys(target, allowed=fields, required=fields)
+            identifier = target["id"]
+            if type(identifier) is not int or identifier in seen or identifier not in by_id:
+                raise ValueError("expected assets must identify every selected photo exactly once")
+            seen.add(identifier)
+            if any(target[field] != by_id[identifier][field] for field in fields):
+                raise ValueError(
+                    "A photo changed in the library; no annotations were changed. "
+                    "Refresh the library and review the pending edits"
+                )
+
+    def _serve_starred(self, query: dict[str, list[str]]) -> None:
+        offset = _bounded_int(_single(query, "offset"), default=0, minimum=0, maximum=100_000)
+        limit = _bounded_int(_single(query, "limit"), default=250, minimum=1, maximum=500)
+        minimum = _bounded_int(_single(query, "rating"), default=1, minimum=1, maximum=5)
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            annotations = sorted(
+                (a for a in workspace.annotations() if a["rating"] >= minimum),
+                key=lambda a: (a["rating"], a["updated_at"]),
+                reverse=True,
+            )
+        identities = [(a["provider"], a["remote_path"]) for a in annotations]
+        records = []
+        with StateStore(self.server.state_dir) as store:
+            for start in range(0, len(identities), 500):
+                records.extend(store.library_assets_by_identities(identities[start : start + 500]))
+        by_identity = {(r["provider"], r["remote_path"]): r for r in records}
+        records = [by_identity[i] for i in identities if i in by_identity]
+        page = records[offset : offset + limit]
+        next_offset = offset + len(page)
+        self._send_json(
+            {
+                "assets": self._annotated_payloads(page),
+                "total": len(records),
+                "has_more": next_offset < len(records),
+                "next_offset": next_offset if next_offset < len(records) else None,
                 "cloud_access": False,
             }
         )
@@ -258,16 +843,107 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         if len(search_query) > _MAX_SEARCH_LENGTH:
             raise ValueError(f"semantic query must be {_MAX_SEARCH_LENGTH} characters or fewer")
         limit = _bounded_int(_single(query, "limit"), default=50, minimum=1, maximum=100)
+        variety = _single(query, "variety") or "0"
+        if variety not in ("0", "1"):
+            raise ValueError("variety must be 0 or 1")
         if self.server.vector_index.size == 0:
             raise ConfigurationError("semantic index has no completed vectors")
-        matches = self.server.get_semantic_search().search(search_query, limit=limit)
+        self._require_search_access()
+        order = _search_order(query, variety=variety == "1")
+        filters = self._query_filters(query)
+        allowed = self._matching_ids(filters)
+        entry, vector, cached = self.server.search_history.resolve(
+            query=search_query, image=None, image_name=None, filters=filters, order=order,
+            encode=lambda: self.server.get_semantic_search().text_vector(search_query),
+        )
+        matches = self.server.vector_index.search_vector(
+            vector, limit=limit, order=order, allowed_asset_ids=allowed,
+        )
         self._send_matches(
             matches,
             {
-                "query": search_query,
-                "mode": "semantic",
+                "query": search_query, "mode": "semantic", "history_id": entry["id"],
+                "query_cached": cached,
+                "ranking": "relevance_with_variety" if order == "variety" else "relevance",
+                "order": order,
             },
         )
+
+    def _require_search_access(self) -> None:
+        if not self.server.workspace_writes_enabled:
+            raise PermissionError("Gemini queries are disabled on non-loopback binds")
+        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            raise PermissionError("cross-site Gemini queries are disabled")
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin != f"http://{host}":
+            raise PermissionError("cross-origin Gemini queries are disabled")
+        if not _is_loopback(urlsplit(f"http://{host}").hostname or ""):
+            raise PermissionError("Gemini queries require a loopback Host")
+
+    def _serve_image_search(self, payload: dict[str, Any]) -> None:
+        _validate_json_keys(
+            payload,
+            allowed={"image_base64", "image_name", "query", "limit", "order", "filters"},
+            required={"image_base64"},
+        )
+        encoded = payload["image_base64"]
+        if not isinstance(encoded, str) or len(encoded) > 1_398_104:
+            raise ValueError("image search requires a base64 JPEG preview up to 1 MiB")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise ValueError("image search requires valid base64 image data") from error
+        query = payload.get("query", "")
+        if not isinstance(query, str) or len(query.strip()) > _MAX_SEARCH_LENGTH:
+            raise ValueError("image search text must be at most 200 characters")
+        query = query.strip()
+        image_name = payload.get("image_name", "Reference image")
+        if not isinstance(image_name, str) or not 1 <= len(image_name) <= 255:
+            raise ValueError("image name must be between 1 and 255 characters")
+        limit = payload.get("limit", 100)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("image search limit must be between 1 and 100")
+        order = payload.get("order", "closest")
+        if order not in ("closest", "least_similar", "variety"):
+            raise ValueError("order must be closest, least_similar, or variety")
+        if self.server.vector_index.size == 0:
+            raise ConfigurationError("semantic index has no completed vectors")
+        filters = photo_filters(payload.get("filters", {}))
+        allowed = self._matching_ids(filters)
+        entry, vector, cached = self.server.search_history.resolve(
+            query=query, image=data, image_name=image_name, filters=filters, order=order,
+            encode=lambda: self.server.get_semantic_search().encoder.encode_image_query(
+                data, query
+            ),
+        )
+        matches = self.server.vector_index.search_vector(
+            vector, limit=limit, order=order, allowed_asset_ids=allowed,
+        )
+        self._send_matches(matches, {
+            "mode": "image_search", "query": query, "order": order,
+            "history_id": entry["id"], "query_cached": cached,
+        })
+
+    def _replay_search(self, identifier: str, payload: dict[str, Any]) -> None:
+        _validate_json_keys(
+            payload, allowed={"filters", "order", "expected_data_id"},
+            required={"filters", "order", "expected_data_id"},
+        )
+        self._validate_workspace_identity(payload)
+        order = payload["order"]
+        if order not in ("closest", "least_similar", "variety"):
+            raise ValueError("order must be closest, least_similar, or variety")
+        filters = photo_filters(payload["filters"])
+        allowed = self._matching_ids(filters)
+        entry, vector = self.server.search_history.replay(identifier, filters=filters, order=order)
+        matches = self.server.vector_index.search_vector(
+            vector, limit=100, order=order, allowed_asset_ids=allowed,
+        )
+        self._send_matches(matches, {
+            "mode": "image_search" if entry["kind"] == "image" else "semantic",
+            "query": entry["query"], "order": order, "history_id": identifier, "query_cached": True,
+        })
 
     def _serve_similar(
         self,
@@ -277,12 +953,19 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         limit = _bounded_int(_single(query, "limit"), default=50, minimum=1, maximum=100)
         if self.server.vector_index.size == 0:
             raise ConfigurationError("similarity index has no completed vectors")
-        matches = self.server.vector_index.similar(asset_id, limit=limit)
+        order = _search_order(query)
+        matches = self.server.vector_index.similar(
+            asset_id,
+            limit=limit,
+            order=order,
+            allowed_asset_ids=self._matching_ids(self._query_filters(query)),
+        )
         self._send_matches(
             matches,
             {
                 "source_asset_id": asset_id,
                 "mode": "visual_similarity",
+                "order": order,
             },
         )
 
@@ -294,7 +977,9 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         limit = _bounded_int(_single(query, "limit"), default=12, minimum=1, maximum=50)
         if self.server.vector_index.size == 0:
             raise ConfigurationError("curator index has no completed vectors")
-        matches = self.server.vector_index.similar(asset_id, limit=limit)
+        matches = self.server.vector_index.similar(
+            asset_id, limit=limit, allowed_asset_ids=self._matching_ids({})
+        )
         source_assets = self._asset_payloads_by_ids([asset_id])
         if not source_assets:
             raise KeyError(f"asset {asset_id} is not available in the local library")
@@ -405,10 +1090,15 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
     def _serve_sequences(self) -> None:
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             sequences = workspace.list_sequences()
+            folders = workspace.list_folders()
             status = workspace.status()
+        for sequence in sequences:
+            if sequence.get("smart_filters") is not None:
+                sequence["item_count"] = len(self._matching_ids(sequence["smart_filters"]))
         self._send_json(
             {
                 "sequences": sequences,
+                "folders": folders,
                 "workspace": {
                     "database_integrity": status["database_integrity"],
                     "items": status["items"],
@@ -428,12 +1118,33 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _create_sequence(self, payload: dict[str, Any]) -> None:
-        _validate_json_keys(payload, allowed={"name", "note"}, required={"name"})
+        _validate_json_keys(
+            payload,
+            allowed={
+                "name",
+                "note",
+                "sequence_id",
+                "folder_id",
+                "smart_filters",
+                "expected_data_id",
+            },
+            required={"name"},
+        )
+        self._validate_workspace_identity(payload)
+        identifier = payload.get("sequence_id")
+        if "sequence_id" in payload and (
+            not isinstance(identifier, str) or str(UUID(identifier)) != identifier
+        ):
+            raise ValueError("sequence_id must be a canonical UUID")
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             sequence = workspace.create_sequence(
                 payload["name"],
                 note=payload.get("note", ""),
                 origin="manual",
+                sequence_id=identifier,
+                reuse_existing=identifier is not None,
+                folder_id=payload.get("folder_id"),
+                smart_filters=payload.get("smart_filters"),
             )
         self._send_json(
             {
@@ -444,14 +1155,23 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _update_sequence(self, sequence_id: str, payload: dict[str, Any]) -> None:
-        _validate_json_keys(payload, allowed={"name", "note"})
-        if not payload:
-            raise ValueError("sequence update must include name or note")
+        _validate_json_keys(
+            payload, allowed={"name", "note", "folder_id", "smart_filters", "expected_data_id"}
+        )
+        self._validate_workspace_identity(payload)
+        if not {"name", "note", "folder_id", "smart_filters"}.intersection(payload):
+            raise ValueError("sequence update must include name, note, or folder_id")
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             sequence = workspace.update_sequence(
                 sequence_id,
                 name=payload.get("name"),
                 note=payload.get("note"),
+                **({"folder_id": payload["folder_id"]} if "folder_id" in payload else {}),
+                **(
+                    {"smart_filters": photo_filters(payload["smart_filters"])}
+                    if "smart_filters" in payload
+                    else {}
+                ),
             )
         self._send_json(
             {
@@ -460,8 +1180,53 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _create_sequence_folder(self, payload: dict[str, Any]) -> None:
+        _validate_json_keys(
+            payload,
+            allowed={"name", "parent_id", "folder_id", "expected_data_id"},
+            required={"name"},
+        )
+        self._validate_workspace_identity(payload)
+        identifier = payload.get("folder_id")
+        if "folder_id" in payload and (
+            not isinstance(identifier, str) or str(UUID(identifier)) != identifier
+        ):
+            raise ValueError("folder_id must be a canonical UUID")
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            folder = workspace.create_folder(
+                payload["name"],
+                parent_id=payload.get("parent_id"),
+                folder_id=identifier,
+                reuse_existing=identifier is not None,
+            )
+        self._send_json({"folder": folder, "archive_modified": False}, status=HTTPStatus.CREATED)
+
+    def _change_sequence_folder(
+        self,
+        folder_id: str,
+        payload: dict[str, Any],
+        *,
+        remove: bool,
+    ) -> None:
+        allowed = {"expected_data_id"} if remove else {"name", "parent_id", "expected_data_id"}
+        _validate_json_keys(payload, allowed=allowed)
+        self._validate_workspace_identity(payload)
+        with WorkspaceStore(self.server.workspace_dir) as workspace:
+            if remove:
+                workspace.remove_folder(folder_id)
+                self._send_json({"removed": True, "archive_modified": False})
+                return
+            if not {"name", "parent_id"}.intersection(payload):
+                raise ValueError("folder update must include name or parent_id")
+            folder = workspace.update_folder(
+                folder_id,
+                name=payload.get("name"),
+                **({"parent_id": payload["parent_id"]} if "parent_id" in payload else {}),
+            )
+        self._send_json({"folder": folder, "archive_modified": False})
+
     def _add_sequence_items(self, sequence_id: str, payload: dict[str, Any]) -> None:
-        _validate_json_keys(payload, allowed={"asset_ids"}, required={"asset_ids"})
+        _validate_json_keys(payload, allowed={"asset_ids", "expected"}, required={"asset_ids"})
         asset_ids = _integer_list(payload["asset_ids"], "asset_ids", maximum=100)
         with StateStore(self.server.state_dir) as store:
             records = store.library_assets_by_ids(asset_ids)
@@ -469,6 +1234,8 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             found_ids = {int(record["id"]) for record in records}
             missing = [asset_id for asset_id in asset_ids if asset_id not in found_ids]
             raise KeyError(f"local library assets were not found: {missing}")
+        if "expected" in payload:
+            self._validate_annotation_targets(payload["expected"], records)
         assets = [
             WorkspaceAsset(
                 provider=str(record["provider"]),
@@ -492,6 +1259,12 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 "archive_modified": False,
             }
         )
+
+    def _validate_workspace_identity(self, payload: dict[str, Any]) -> None:
+        if "expected_data_id" in payload and (
+            payload["expected_data_id"] != self.server.service_info["data_id"]
+        ):
+            raise ValueError("This draft belongs to another library; no changes were made")
 
     def _reorder_sequence(self, sequence_id: str, payload: dict[str, Any]) -> None:
         _validate_json_keys(payload, allowed={"item_ids"}, required={"item_ids"})
@@ -518,7 +1291,9 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _delete_sequence(self, sequence_id: str) -> None:
+    def _delete_sequence(self, sequence_id: str, payload: dict[str, Any]) -> None:
+        _validate_json_keys(payload, allowed={"expected_data_id"})
+        self._validate_workspace_identity(payload)
         with WorkspaceStore(self.server.workspace_dir) as workspace:
             deleted = workspace.delete_sequence(sequence_id)
         if not deleted:
@@ -526,6 +1301,24 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"deleted": True, "archive_modified": False})
 
     def _hydrate_sequence(self, sequence: dict[str, Any]) -> dict[str, Any]:
+        if sequence.get("smart_filters") is not None:
+            ids = self._matching_ids(sequence["smart_filters"])
+            with StateStore(self.server.state_dir) as store:
+                assets = self._annotated_payloads(store.library_assets_by_ids(ids[:250]))
+            return {
+                **sequence,
+                "item_count": len(ids),
+                "next_offset": 250 if len(ids) > 250 else None,
+                "items": [
+                    {
+                        "id": f"smart-{asset['id']}",
+                        "name": asset["name"],
+                        "asset": asset,
+                        "library_status": "available",
+                    }
+                    for asset in assets
+                ],
+            }
         items = list(sequence["items"])
         identities = [(str(item["provider"]), str(item["remote_path"])) for item in items]
         current_assets = []
@@ -537,6 +1330,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         by_identity = {
             (str(asset["provider"]), str(asset["remote_path"])): asset for asset in current_assets
         }
+        annotated = {item["id"]: item for item in self._annotated_payloads(current_assets)}
         hydrated_items = []
         for item in items:
             identity = (str(item["provider"]), str(item["remote_path"]))
@@ -551,7 +1345,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                         if str(current["fingerprint"]) == str(item["fingerprint"])
                         else "changed"
                     ),
-                    "asset": self._asset_payload(current) if current is not None else None,
+                    "asset": annotated[current["id"]] if current is not None else None,
                 }
             )
         return {**sequence, "items": hydrated_items, "item_count": len(hydrated_items)}
@@ -564,7 +1358,9 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 "total": len(results),
                 "results": results,
                 "basis": self._relation_basis(),
-                "cloud_access": False,
+                "cloud_access": context.get("mode") in {"semantic", "image_search"}
+                and not context.get("query_cached", False),
+                "archive_cloud_access": False,
             }
         )
 
@@ -591,13 +1387,14 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         with StateStore(self.server.state_dir) as store:
             for start in range(0, len(asset_ids), 500):
                 assets.extend(store.library_assets_by_ids(asset_ids[start : start + 500]))
-        return [self._asset_payload(asset) for asset in assets]
+        return self._annotated_payloads(assets)
 
     def _relation_basis(self) -> dict[str, str]:
         return {
             "model_id": self.server.vector_index.model_id,
             "metric": "cosine_similarity",
             "source": "local_contact_embeddings",
+            "embedding_provider": "gemini_api",
             "interpretation": (
                 "Similarity is model evidence, not proof of place, identity, or story."
             ),
@@ -609,10 +1406,13 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             "id": asset["id"],
             "name": asset["name"],
             "remote_path": asset["remote_path"],
+            "provider": asset["provider"],
+            "fingerprint": asset["fingerprint"],
             "size_bytes": asset["size_bytes"],
             "capture_at": asset["capture_at"],
             "camera_model": asset["camera_model"],
             "lens_model": asset["lens_model"],
+            "exif": _cached_photo_exif(asset.get("exif_json")),
             "preview_width": asset["preview_width"],
             "preview_height": asset["preview_height"],
             "contact_url": "/media/" + quote(str(asset["contact_path"]), safe="/"),
@@ -635,7 +1435,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             cache_control="public, max-age=31536000, immutable",
         )
 
-    def _read_json_body(self) -> dict[str, Any]:
+    def _read_json_body(self, *, maximum: int = _MAX_JSON_BODY_BYTES) -> dict[str, Any]:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             raise ValueError("workspace mutations require application/json")
@@ -643,10 +1443,8 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         if raw_length is None:
             raise ValueError("workspace mutations require Content-Length")
         length = int(raw_length)
-        if length < 1 or length > _MAX_JSON_BODY_BYTES:
-            raise ValueError(
-                f"workspace JSON body must be between 1 and {_MAX_JSON_BODY_BYTES} bytes"
-            )
+        if length < 1 or length > maximum:
+            raise ValueError(f"JSON body must be between 1 and {maximum} bytes")
         payload = json.loads(self.rfile.read(length))
         if not isinstance(payload, dict):
             raise ValueError("workspace JSON body must be an object")
@@ -684,26 +1482,53 @@ def serve_library(
     allow_remote: bool = False,
     embedding_dir: Path | None = None,
     workspace_dir: Path = DEFAULT_WORKSPACE_DIR,
+    editing_dir: Path = DEFAULT_EDITING_DIR,
+    ready_json: bool = False,
+    exit_on_stdin_close: bool = False,
 ) -> None:
     if not allow_remote and not _is_loopback(host):
         raise ConfigurationError("refusing a non-loopback bind without --allow-remote")
-    server = LibraryServer(
-        (host, port),
-        state_dir,
-        embedding_dir=embedding_dir,
-        workspace_dir=workspace_dir,
-    )
-    actual_host, actual_port = server.server_address[:2]
-    print(f"Latent contact sheet: http://{actual_host}:{actual_port}", flush=True)
-    print("CloudDrive access: disabled in this server", flush=True)
-    print(
-        f"Workspace writes: {'enabled' if server.workspace_writes_enabled else 'disabled'}",
-        flush=True,
-    )
-    try:
-        server.serve_forever(poll_interval=0.2)
-    finally:
-        server.server_close()
+    with workspace_service_lease(workspace_dir):
+        try:
+            server = LibraryServer(
+                (host, port),
+                state_dir,
+                embedding_dir=embedding_dir,
+                workspace_dir=workspace_dir,
+                editing_dir=editing_dir,
+            )
+        except OSError as error:
+            raise ConfigurationError(
+                f"Cannot start the library at {host}:{port}: {error.strerror}. "
+                "Check the address and port; no existing process was stopped."
+            ) from error
+        try:
+            if exit_on_stdin_close:
+                # Only an explicitly managed service watches its owner's pipe.
+                # EOF also arrives if the owner crashes; there is no saved PID to reuse.
+                def wait_for_owner() -> None:
+                    while sys.stdin.buffer.read(1024):
+                        pass
+                    server.shutdown()
+
+                threading.Thread(target=wait_for_owner, daemon=True).start()
+            actual_host, actual_port = server.server_address[:2]
+            address = f"http://{actual_host}:{actual_port}"
+            if ready_json:
+                ready = {**server.service_info, "event": "ready", "url": address}
+                print(json.dumps(ready), flush=True)
+            else:
+                print(f"Latent contact sheet: {address}", flush=True)
+                print(
+                    "Browsing: local cache; editing transfers: explicit; "
+                    "semantic queries: Gemini API",
+                    flush=True,
+                )
+                writable = "enabled" if server.workspace_writes_enabled else "disabled"
+                print(f"Workspace writes: {writable}", flush=True)
+            server.serve_forever(poll_interval=0.2)
+        finally:
+            server.server_close()
 
 
 def _single(query: dict[str, list[str]], key: str) -> str | None:
@@ -762,6 +1587,32 @@ def _string_list(value: Any, field: str, *, maximum: int) -> list[str]:
     return value
 
 
+def _cached_photo_exif(raw: str | None) -> dict[str, float]:
+    """Expose shooting settings already indexed locally, without serials or GPS."""
+    try:
+        metadata = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    result = {}
+    for source, field in (
+        ("ExposureTime", "exposure_time"), ("FNumber", "f_number"),
+        ("ISO", "iso"), ("FocalLength", "focal_length"),
+        ("ImageWidth", "image_width"), ("ImageHeight", "image_height"),
+    ):
+        value = metadata.get(source)
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            continue
+        try:
+            number = float(Fraction(value.split()[0])) if isinstance(value, str) else float(value)
+        except (ValueError, IndexError, ZeroDivisionError, OverflowError):
+            continue
+        if math.isfinite(number) and 0 < number <= 1_000_000_000:
+            result[field] = number
+    return result
+
+
 def _is_loopback(host: str) -> bool:
     if host == "localhost":
         return True
@@ -782,3 +1633,10 @@ def _content_security_policy() -> str:
         "base-uri 'none'; "
         "frame-ancestors 'none'"
     )
+
+
+def _search_order(query: dict[str, list[str]], *, variety: bool = False) -> str:
+    order = _single(query, "order") or ("variety" if variety else "closest")
+    if order not in ("closest", "least_similar", "variety"):
+        raise ValueError("order must be closest, least_similar, or variety")
+    return order

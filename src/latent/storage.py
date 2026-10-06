@@ -88,6 +88,13 @@ class StateStore:
             CREATE INDEX IF NOT EXISTS idx_assets_capture_at ON assets(capture_at);
             CREATE INDEX IF NOT EXISTS idx_assets_extension ON assets(extension);
 
+            CREATE TABLE IF NOT EXISTS hidden_assets (
+                provider TEXT NOT NULL,
+                remote_path TEXT NOT NULL,
+                trash_id TEXT NOT NULL,
+                PRIMARY KEY(provider, remote_path)
+            );
+
             CREATE TABLE IF NOT EXISTS cache_entries (
                 asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
                 variant TEXT NOT NULL CHECK(variant IN ('contact', 'preview', 'temporary')),
@@ -907,7 +914,10 @@ class StateStore:
                 FROM assets AS a
                 JOIN cache_entries AS contact
                   ON contact.asset_id = a.id AND contact.variant = 'contact'
-                WHERE a.capture_at IS NOT NULL
+                WHERE a.capture_at IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM hidden_assets h
+                    WHERE h.provider=a.provider AND h.remote_path=a.remote_path
+                )
                 GROUP BY capture_date
                 ORDER BY capture_date DESC
                 """
@@ -921,13 +931,18 @@ class StateStore:
         search_query: str | None = None,
         limit: int = 250,
         offset: int = 0,
+        allowed_asset_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         conditions, parameters = _library_asset_filters(capture_date, search_query)
+        conditions.append(self.visible_condition())
+        if allowed_asset_ids is not None:
+            self._allowed_assets(allowed_asset_ids)
+            conditions.append("a.id IN (SELECT id FROM allowed_assets)")
         parameters.extend((limit, offset))
         query = f"""
             SELECT
-                a.id, a.name, a.remote_path, a.size_bytes, a.capture_at,
-                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                a.id, a.provider, a.fingerprint, a.name, a.remote_path, a.size_bytes, a.capture_at,
+                a.camera_model, a.lens_model, a.exif_json, a.preview_width, a.preview_height,
                 contact.relative_path AS contact_path,
                 preview.relative_path AS preview_path
             FROM assets AS a
@@ -941,13 +956,38 @@ class StateStore:
         """
         return [dict(row) for row in self.connection.execute(query, parameters)]
 
+    def library_asset_ids(
+        self,
+        *,
+        capture_date: str | None = None,
+        search_query: str | None = None,
+        allowed_asset_ids: list[int] | None = None,
+    ) -> list[int]:
+        """Ordered visible IDs, for grouping before pagination without loading EXIF."""
+        conditions, parameters = _library_asset_filters(capture_date, search_query)
+        conditions.append(self.visible_condition())
+        if allowed_asset_ids is not None:
+            self._allowed_assets(allowed_asset_ids)
+            conditions.append("a.id IN (SELECT id FROM allowed_assets)")
+        return [int(row[0]) for row in self.connection.execute(
+            f"""SELECT a.id FROM assets a
+            JOIN cache_entries c ON c.asset_id=a.id AND c.variant='contact'
+            WHERE {' AND '.join(conditions)}
+            ORDER BY a.capture_at ASC, a.name ASC, a.id ASC""", parameters,
+        )]
+
     def library_asset_count(
         self,
         *,
         capture_date: str | None = None,
         search_query: str | None = None,
+        allowed_asset_ids: list[int] | None = None,
     ) -> int:
         conditions, parameters = _library_asset_filters(capture_date, search_query)
+        conditions.append(self.visible_condition())
+        if allowed_asset_ids is not None:
+            self._allowed_assets(allowed_asset_ids)
+            conditions.append("a.id IN (SELECT id FROM allowed_assets)")
         row = self.connection.execute(
             f"""
             SELECT COUNT(*)
@@ -972,7 +1012,7 @@ class StateStore:
             SELECT
                 a.id, a.provider, a.fingerprint, a.name, a.remote_path,
                 a.size_bytes, a.capture_at,
-                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                a.camera_model, a.lens_model, a.exif_json, a.preview_width, a.preview_height,
                 contact.relative_path AS contact_path,
                 preview.relative_path AS preview_path
             FROM assets AS a
@@ -980,7 +1020,7 @@ class StateStore:
               ON contact.asset_id = a.id AND contact.variant = 'contact'
             LEFT JOIN cache_entries AS preview
               ON preview.asset_id = a.id AND preview.variant = 'preview'
-            WHERE a.id IN ({placeholders})
+            WHERE a.id IN ({placeholders}) AND {self.visible_condition()}
             """,
             unique_ids,
         ).fetchall()
@@ -1003,7 +1043,7 @@ class StateStore:
             SELECT
                 a.id, a.provider, a.fingerprint, a.name, a.remote_path,
                 a.size_bytes, a.capture_at,
-                a.camera_model, a.lens_model, a.preview_width, a.preview_height,
+                a.camera_model, a.lens_model, a.exif_json, a.preview_width, a.preview_height,
                 contact.relative_path AS contact_path,
                 preview.relative_path AS preview_path
             FROM assets AS a
@@ -1011,12 +1051,29 @@ class StateStore:
               ON contact.asset_id = a.id AND contact.variant = 'contact'
             LEFT JOIN cache_entries AS preview
               ON preview.asset_id = a.id AND preview.variant = 'preview'
-            WHERE {conditions}
+            WHERE ({conditions}) AND {self.visible_condition()}
             """,
             parameters,
         ).fetchall()
         by_identity = {(str(row["provider"]), str(row["remote_path"])): dict(row) for row in rows}
         return [by_identity[identity] for identity in identities if identity in by_identity]
+
+    @staticmethod
+    def visible_condition() -> str:
+        return (
+            "NOT EXISTS (SELECT 1 FROM hidden_assets h "
+            "WHERE h.provider=a.provider AND h.remote_path=a.remote_path)"
+        )
+
+    def _allowed_assets(self, asset_ids: list[int]) -> None:
+        self.connection.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS allowed_assets(id INTEGER PRIMARY KEY)"
+        )
+        self.connection.execute("DELETE FROM allowed_assets")
+        self.connection.executemany(
+            "INSERT OR IGNORE INTO allowed_assets VALUES (?)",
+            ((identifier,) for identifier in asset_ids),
+        )
 
     def status(self) -> dict[str, Any]:
         asset_count = self.connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
@@ -1052,12 +1109,10 @@ def _library_asset_filters(
     if capture_date is not None:
         conditions.append(
             """
-            substr(a.capture_at, 1, 4) || '-' ||
-            substr(a.capture_at, 6, 2) || '-' ||
-            substr(a.capture_at, 9, 2) = ?
+            substr(replace(substr(a.capture_at, 1, 10), ':', '-'), 1, ?) = ?
             """
         )
-        parameters.append(capture_date)
+        parameters.extend((len(capture_date), capture_date))
     if search_query:
         conditions.append(
             """
