@@ -6,17 +6,19 @@ import math
 import sqlite3
 import struct
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from .errors import ConfigurationError
+from .errors import ConfigurationError, EmbeddingServiceError
+from .gemini import GEMINI_DIMENSIONS, GEMINI_MODEL
 
 EMBEDDING_SCHEMA_VERSION = 1
-DEFAULT_EMBEDDING_MODEL = "google/siglip2-base-patch16-224"
-DEFAULT_EMBEDDING_DIMENSIONS = 768
+DEFAULT_EMBEDDING_MODEL = GEMINI_MODEL
+DEFAULT_EMBEDDING_DIMENSIONS = GEMINI_DIMENSIONS
 EMBEDDING_DTYPE = "float16"
 
 
@@ -100,7 +102,7 @@ class EmbeddingRunResult:
             "stopped_after_consecutive_failures": self.stopped_after_consecutive_failures,
             "failures": [failure.__dict__ for failure in self.failures],
             "source": "local_contact_cache",
-            "photo_network_bytes": 0,
+            "archive_network_bytes": 0,
             "archive_modified": False,
         }
 
@@ -128,6 +130,7 @@ class EmbeddingStore:
         self.database_path = self.embedding_dir / "index.sqlite"
         self.model_id = model_id
         self.dimensions = dimensions
+        self._scope_sql = ""
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -226,6 +229,7 @@ class EmbeddingStore:
         assets: Sequence[EmbeddingAsset],
         *,
         retry_failed: bool = False,
+        prune_missing: bool = True,
     ) -> EmbeddingSyncResult:
         source = list(assets)
         identities = [asset.identity for asset in source]
@@ -325,7 +329,7 @@ class EmbeddingStore:
             removed_ids = [
                 int(row["id"])
                 for identity, row in existing.items()
-                if identity not in source_identities
+                if prune_missing and identity not in source_identities
             ]
             if removed_ids:
                 self.connection.executemany(
@@ -346,16 +350,34 @@ class EmbeddingStore:
             pending_jobs=counts["pending"],
         )
 
+    @contextmanager
+    def job_scope(self, asset_ids: Sequence[int]):
+        """A confirmed selection cannot claim or recover jobs outside that selection."""
+        if self._scope_sql:
+            raise ValueError("An embedding job scope is already active")
+        self.connection.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS requested_assets(id INTEGER PRIMARY KEY)"
+        )
+        self.connection.execute("DELETE FROM requested_assets")
+        self.connection.executemany("INSERT INTO requested_assets VALUES (?)",
+                                    ((identifier,) for identifier in sorted(set(asset_ids))))
+        self.connection.commit()
+        self._scope_sql = " AND asset_id IN (SELECT id FROM requested_assets)"
+        try:
+            yield
+        finally:
+            self._scope_sql = ""
+
     def claim_jobs(self, limit: int) -> list[EmbeddingJob]:
         if limit < 1:
             raise ValueError("claim limit must be positive")
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             rows = self.connection.execute(
-                """
+                f"""
                 SELECT *
                 FROM embedding_jobs
-                WHERE status='pending'
+                WHERE status='pending' {self._scope_sql}
                 ORDER BY capture_at DESC, remote_path ASC
                 LIMIT ?
                 """,
@@ -487,11 +509,11 @@ class EmbeddingStore:
 
     def requeue_running_jobs(self, *, before: str) -> int:
         cursor = self.connection.execute(
-            """
+            f"""
             UPDATE embedding_jobs SET
                 status='pending', updated_at=?, claimed_at=NULL,
                 finished_at=NULL, last_error='worker interrupted before completion'
-            WHERE status='running' AND claimed_at < ?
+            WHERE status='running' AND claimed_at < ? {self._scope_sql}
             """,
             (utc_now(), before),
         )
@@ -500,11 +522,11 @@ class EmbeddingStore:
 
     def requeue_failed_jobs(self) -> int:
         cursor = self.connection.execute(
-            """
+            f"""
             UPDATE embedding_jobs SET
                 status='pending', updated_at=?, claimed_at=NULL,
                 finished_at=NULL, last_error=NULL
-            WHERE status='failed'
+            WHERE status='failed' {self._scope_sql}
             """,
             (utc_now(),),
         )
@@ -556,6 +578,53 @@ class EmbeddingStore:
         )
 
     def status(self) -> dict[str, object]:
+        # Hold one read snapshot while API workers commit new batches concurrently.
+        self.connection.execute("SAVEPOINT embedding_status")
+        try:
+            return self._status_snapshot()
+        finally:
+            self.connection.execute("RELEASE embedding_status")
+
+    def progress(self, *, exclude_asset_ids: Sequence[int] = ()) -> dict[str, object]:
+        """Read queue coverage in one snapshot, without loading vectors or checking integrity."""
+        stale_before = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+        condition = ""
+        if exclude_asset_ids:
+            self.connection.execute("CREATE TEMP TABLE excluded_assets(id INTEGER PRIMARY KEY)")
+            self.connection.executemany(
+                "INSERT OR IGNORE INTO excluded_assets VALUES (?)",
+                ((identifier,) for identifier in exclude_asset_ids),
+            )
+            condition = "WHERE j.asset_id NOT IN (SELECT id FROM excluded_assets)"
+        row = self.connection.execute(
+            f"""
+            SELECT COUNT(*) AS total,
+                   COUNT(CASE WHEN j.status='pending' THEN 1 END) AS pending,
+                   COUNT(CASE WHEN j.status='running' THEN 1 END) AS running,
+                   COUNT(CASE WHEN j.status='succeeded' THEN 1 END) AS succeeded,
+                   COUNT(CASE WHEN j.status='failed' THEN 1 END) AS failed,
+                   COUNT(CASE WHEN j.status='running'
+                       AND (j.claimed_at IS NULL OR j.claimed_at < ?) THEN 1 END) AS stale,
+                   COUNT(CASE WHEN j.status='succeeded'
+                       AND e.fingerprint=j.fingerprint THEN 1 END) AS indexed
+            FROM embedding_jobs AS j
+            LEFT JOIN embeddings AS e ON e.job_id=j.id
+            {condition}
+            """,
+            (stale_before,),
+        ).fetchone()
+        if exclude_asset_ids:
+            self.connection.execute("DROP TABLE excluded_assets")
+        return {
+            "queued_assets": int(row["total"]),
+            "indexed_assets": int(row["indexed"]),
+            "stale_jobs": int(row["stale"]),
+            "jobs": {
+                name: int(row[name]) for name in ("pending", "running", "succeeded", "failed")
+            },
+        }
+
+    def _status_snapshot(self) -> dict[str, object]:
         row = self.connection.execute(
             "SELECT COUNT(*) AS count, COALESCE(SUM(length(vector)), 0) AS bytes FROM embeddings"
         ).fetchone()
@@ -571,7 +640,7 @@ class EmbeddingStore:
             "vectors": int(row["count"]),
             "vector_bytes": int(row["bytes"]),
             "source": "local_contact_cache",
-            "photo_network_bytes": 0,
+            "archive_network_bytes": 0,
             "archive_modified": False,
         }
 
@@ -599,6 +668,8 @@ class EmbeddingWorker:
         stale_after: timedelta = timedelta(minutes=30),
         max_consecutive_failures: int = 5,
         retry_failed: bool = False,
+        progress: Callable[[EmbeddingRunResult], None] | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> EmbeddingRunResult:
         if max_jobs < 1:
             raise ValueError("max_jobs must be positive")
@@ -614,6 +685,8 @@ class EmbeddingWorker:
         )
         consecutive_failures = 0
         while outcome.processed < max_jobs:
+            if stop_requested is not None and stop_requested():
+                break
             remaining = max_jobs - outcome.processed
             jobs = self.store.claim_jobs(min(batch_size, remaining))
             if not jobs:
@@ -627,7 +700,7 @@ class EmbeddingWorker:
                 outcome.succeeded += len(jobs)
                 outcome.vector_bytes_written += sum(len(vector) for _, vector in completed)
                 consecutive_failures = 0
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EmbeddingServiceError):
                 self.store.release_jobs([job.id for job in jobs])
                 raise
             except Exception:
@@ -637,9 +710,13 @@ class EmbeddingWorker:
                     outcome,
                     consecutive_failures=consecutive_failures,
                     max_consecutive_failures=max_consecutive_failures,
+                    stop_requested=stop_requested,
                 )
                 if outcome.stopped_after_consecutive_failures:
                     break
+            if progress is not None:
+                outcome.elapsed_ms = round((time.perf_counter() - started) * 1000)
+                progress(outcome)
         outcome.elapsed_ms = round((time.perf_counter() - started) * 1000)
         return outcome
 
@@ -650,8 +727,12 @@ class EmbeddingWorker:
         *,
         consecutive_failures: int,
         max_consecutive_failures: int,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> int:
         for index, job in enumerate(jobs):
+            if stop_requested is not None and stop_requested():
+                self.store.release_jobs([remaining.id for remaining in jobs[index:]])
+                break
             if consecutive_failures >= max_consecutive_failures:
                 self.store.release_jobs([remaining.id for remaining in jobs[index:]])
                 outcome.stopped_after_consecutive_failures = True
@@ -664,7 +745,7 @@ class EmbeddingWorker:
                 outcome.succeeded += 1
                 outcome.vector_bytes_written += len(completed[0][1])
                 consecutive_failures = 0
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EmbeddingServiceError):
                 self.store.release_jobs([remaining.id for remaining in jobs[index:]])
                 raise
             except Exception as error:

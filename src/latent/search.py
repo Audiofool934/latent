@@ -10,17 +10,12 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from .embedding_benchmark import SigLIP2Encoder, resolve_device
 from .embeddings import (
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingStore,
 )
 from .errors import ConfigurationError
-
-DEFAULT_SIGLIP2_MODEL_CACHE = (
-    Path.home() / "Library/Application Support/Latent/embedding-benchmark/models/siglip2-base"
-)
 
 
 @dataclass(frozen=True)
@@ -48,6 +43,8 @@ class TextEmbeddingEncoder(Protocol):
     model_id: str
 
     def encode_texts(self, texts: Sequence[str]) -> Any: ...
+
+    def encode_image_query(self, data: bytes, query: str = "") -> Sequence[float]: ...
 
 
 class VectorIndex:
@@ -135,7 +132,14 @@ class VectorIndex:
         *,
         limit: int = 50,
         exclude_asset_ids: Sequence[int] = (),
+        variety: bool = False,
+        order: str = "closest",
+        allowed_asset_ids: Sequence[int] | None = None,
     ) -> list[VectorMatch]:
+        if order not in {"closest", "least_similar", "variety"}:
+            raise ValueError("order must be closest, least_similar, or variety")
+        if variety and order == "least_similar":
+            raise ValueError("variety cannot be combined with least_similar")
         if limit < 1 or limit > 500:
             raise ValueError("search limit must be between 1 and 500")
         self.refresh()
@@ -157,11 +161,18 @@ class VectorIndex:
             if asset_ids.size == 0:
                 return []
             scores = matrix @ query
+            if allowed_asset_ids is not None:
+                scores[~np.isin(asset_ids, np.asarray(allowed_asset_ids, dtype=np.int64))] = np.nan
             if exclude_asset_ids:
                 excluded = np.isin(asset_ids, np.asarray(exclude_asset_ids, dtype=np.int64))
                 scores = scores.copy()
-                scores[excluded] = -np.inf
-            ranking = np.argsort(-scores, kind="stable")
+                scores[excluded] = np.nan
+            ranking = np.argsort(scores if order == "least_similar" else -scores, kind="stable")
+            if variety or order == "variety":
+                # Bound reranking to the 500 closest candidates, regardless of page size.
+                # This keeps the first results stable when callers request different limits.
+                candidates = ranking[np.isfinite(scores[ranking])][:500]
+                ranking = _varied_ranking(matrix, scores, candidates, limit)
             matches = []
             for position in ranking.tolist():
                 score = float(scores[position])
@@ -178,14 +189,27 @@ class VectorIndex:
                     break
             return matches
 
-    def similar(self, asset_id: int, *, limit: int = 50) -> list[VectorMatch]:
+    def similar(
+        self,
+        asset_id: int,
+        *,
+        limit: int = 50,
+        order: str = "closest",
+        allowed_asset_ids: Sequence[int] | None = None,
+    ) -> list[VectorMatch]:
         self.refresh()
         with self._lock:
             position = self._asset_positions.get(asset_id)
             if position is None:
                 raise KeyError(f"asset {asset_id} does not have a current embedding")
             vector = self._matrix[position].copy()
-        return self.search_vector(vector, limit=limit, exclude_asset_ids=(asset_id,))
+        return self.search_vector(
+            vector,
+            limit=limit,
+            exclude_asset_ids=(asset_id,),
+            order=order,
+            allowed_asset_ids=allowed_asset_ids,
+        )
 
     def motif_clusters(
         self,
@@ -270,7 +294,22 @@ class SemanticSearch:
         self.vector_index = vector_index
         self.encoder = encoder
 
-    def search(self, query: str, *, limit: int = 50) -> list[VectorMatch]:
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 50,
+        variety: bool = False,
+        order: str = "closest",
+        allowed_asset_ids: Sequence[int] | None = None,
+    ) -> list[VectorMatch]:
+        vector = self.text_vector(query)
+        return self.vector_index.search_vector(
+            vector, limit=limit, variety=variety, order=order,
+            allowed_asset_ids=allowed_asset_ids,
+        )
+
+    def text_vector(self, query: str) -> Any:
         normalized = query.strip()
         if not normalized:
             raise ValueError("semantic query cannot be empty")
@@ -279,60 +318,43 @@ class SemanticSearch:
         vectors = self.encoder.encode_texts([normalized])
         if len(vectors) != 1:
             raise RuntimeError(f"text encoder returned {len(vectors)} vectors for one query")
-        return self.vector_index.search_vector(vectors[0], limit=limit)
+        return vectors[0]
 
-
-class LazySigLIP2TextEncoder:
-    """Loads the local SigLIP2 model once, on the first semantic query."""
-
-    model_id = DEFAULT_EMBEDDING_MODEL
-
-    def __init__(
+    def search_image(
         self,
-        model_cache: Path,
+        data: bytes,
         *,
-        device: str = "auto",
-    ) -> None:
-        self.model_cache = model_cache.expanduser().resolve()
-        self.requested_device = device
-        self._lock = threading.Lock()
-        self._inference_lock = threading.Lock()
-        self._encoder: SigLIP2Encoder | None = None
+        query: str = "",
+        limit: int = 50,
+        order: str = "closest",
+        allowed_asset_ids: Sequence[int] | None = None,
+    ) -> list[VectorMatch]:
+        vector = self.encoder.encode_image_query(data, query)
+        return self.vector_index.search_vector(
+            vector, limit=limit, order=order, allowed_asset_ids=allowed_asset_ids
+        )
 
-    @property
-    def loaded(self) -> bool:
-        return self._encoder is not None
 
-    def encode_texts(self, texts: Sequence[str]) -> Any:
-        encoder = self._get_encoder()
-        with self._inference_lock:
-            return encoder.encode_texts(texts)
-
-    def _get_encoder(self) -> SigLIP2Encoder:
-        if self._encoder is not None:
-            return self._encoder
-        with self._lock:
-            if self._encoder is None:
-                if not self.model_cache.is_dir():
-                    raise ConfigurationError(
-                        f"local SigLIP2 model cache was not found: {self.model_cache}"
-                    )
-                try:
-                    device = resolve_device(self.requested_device)
-                    self._encoder = SigLIP2Encoder(
-                        cache_dir=self.model_cache,
-                        device=device,
-                        local_files_only=True,
-                    )
-                except ModuleNotFoundError as error:
-                    raise ConfigurationError(
-                        "embedding runtime is not installed in the server environment"
-                    ) from error
-                except (OSError, RuntimeError) as error:
-                    raise ConfigurationError(
-                        f"local SigLIP2 model could not be loaded: {error}"
-                    ) from error
-        return self._encoder
+def _varied_ranking(
+    matrix: np.ndarray, scores: np.ndarray, candidates: np.ndarray, limit: int
+) -> np.ndarray:
+    """Greedy relevance/diversity balance; keep original cosine scores for display."""
+    if candidates.size == 0:
+        return candidates
+    vectors = matrix[candidates]
+    relevance = scores[candidates]
+    selected = [0]  # Always retain the closest match first.
+    available = np.ones(len(candidates), dtype=bool)
+    available[0] = False
+    nearest_selected = np.full(len(candidates), -1.0, dtype=np.float32)
+    while len(selected) < min(limit, len(candidates)):
+        nearest_selected = np.maximum(nearest_selected, vectors @ vectors[selected[-1]])
+        priorities = 0.8 * relevance - 0.2 * nearest_selected
+        priorities[~available] = -np.inf
+        chosen = int(np.argmax(priorities))
+        selected.append(chosen)
+        available[chosen] = False
+    return candidates[np.asarray(selected)]
 
 
 def _initial_motif_centers(matrix: np.ndarray, count: int) -> np.ndarray:

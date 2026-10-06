@@ -2,6 +2,10 @@
 
 Date: 2026-08-31
 
+> This document records earlier Library and local-model validation.
+> The active embedding provider changed to Gemini Embedding 2 on 2026-09-05.
+> Current commands and network behavior are documented in [Gemini embeddings](gemini-embeddings.md).
+
 ## Current outcome
 
 Latent 现在可以增量遍历一个真实 CloudDrive 档案目录树，并为其中的 ARW 建立持久化 preview job。
@@ -234,5 +238,5 @@ Inspector 在手机上重新打开时回到顶部，并能滚动到完整证据�
 
 ## Next step
 
-下一步是在资源预算确认后构建全库 embedding，并用完整向量覆盖验证搜索、Curator 与 Sequence 工作流的实际质量和性能。
+当前已授权迁移到 Gemini Embedding 2 API 并构建全库索引；历史本地模型结果不能代表 Gemini 的检索质量。
 DxO handoff 属于当前 Goal 之外的后续工作。

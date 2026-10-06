@@ -16,12 +16,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .curator import build_grounded_curator_report, build_grounded_motif_report
 from .errors import ConfigurationError
-from .search import (
-    DEFAULT_SIGLIP2_MODEL_CACHE,
-    LazySigLIP2TextEncoder,
-    SemanticSearch,
-    VectorIndex,
-)
+from .gemini import GEMINI_STORE_NAME, GeminiEmbeddingEncoder
+from .search import SemanticSearch, VectorIndex
 from .storage import StateStore
 from .workspace import DEFAULT_WORKSPACE_DIR, WorkspaceAsset, WorkspaceStore
 
@@ -50,8 +46,6 @@ class LibraryServer(ThreadingHTTPServer):
         semantic_search: SemanticSearch | None = None,
         embedding_dir: Path | None = None,
         workspace_dir: Path | None = None,
-        model_cache: Path = DEFAULT_SIGLIP2_MODEL_CACHE,
-        semantic_device: str = "auto",
     ) -> None:
         self.state_dir = state_dir.expanduser().resolve()
         self.cache_root = (self.state_dir / "cache").resolve()
@@ -64,13 +58,11 @@ class LibraryServer(ThreadingHTTPServer):
         resolved_embedding_dir = (
             embedding_dir.expanduser().resolve()
             if embedding_dir is not None
-            else self.state_dir / "embeddings/siglip2-base"
+            else self.state_dir / "embeddings" / GEMINI_STORE_NAME
         )
         self.vector_index = vector_index or VectorIndex(resolved_embedding_dir)
         self._semantic_search = semantic_search
         self._semantic_lock = threading.Lock()
-        self.model_cache = model_cache.expanduser().resolve()
-        self.semantic_device = semantic_device
         super().__init__(address, LibraryRequestHandler)
 
     def get_semantic_search(self) -> SemanticSearch:
@@ -80,10 +72,7 @@ class LibraryServer(ThreadingHTTPServer):
             if self._semantic_search is None:
                 self._semantic_search = SemanticSearch(
                     self.vector_index,
-                    LazySigLIP2TextEncoder(
-                        self.model_cache,
-                        device=self.semantic_device,
-                    ),
+                    GeminiEmbeddingEncoder(),
                 )
         return self._semantic_search
 
@@ -695,8 +684,6 @@ def serve_library(
     allow_remote: bool = False,
     embedding_dir: Path | None = None,
     workspace_dir: Path = DEFAULT_WORKSPACE_DIR,
-    model_cache: Path = DEFAULT_SIGLIP2_MODEL_CACHE,
-    semantic_device: str = "auto",
 ) -> None:
     if not allow_remote and not _is_loopback(host):
         raise ConfigurationError("refusing a non-loopback bind without --allow-remote")
@@ -705,8 +692,6 @@ def serve_library(
         state_dir,
         embedding_dir=embedding_dir,
         workspace_dir=workspace_dir,
-        model_cache=model_cache,
-        semantic_device=semantic_device,
     )
     actual_host, actual_port = server.server_address[:2]
     print(f"Latent contact sheet: http://{actual_host}:{actual_port}", flush=True)

@@ -22,12 +22,7 @@ dev = [
   "pytest>=8.4,<9",
   "ruff>=0.12,<1",
 ]
-embedding-bench = [
-  "open-clip-torch==3.3.0",
-  "torch==2.13.0",
-  "torchvision==0.28.0",
-  "transformers==5.16.1",
-]
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latent"]

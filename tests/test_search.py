@@ -184,3 +184,66 @@ def test_vector_and_semantic_queries_reject_invalid_inputs(tmp_path: Path) -> No
         index.search_vector([1.0, 0.0, 0.0, 0.0], limit=501)
     with pytest.raises(ValueError, match="cannot be empty"):
         SemanticSearch(index, FakeTextEncoder([1.0, 0.0, 0.0, 0.0])).search(" ")
+
+
+def test_variety_promotes_a_distinct_frame_without_changing_cosine_scores(tmp_path: Path) -> None:
+    vectors = {
+        1: [0.8, 0.6, 0.0, 0.0],
+        2: [0.8, 0.6, 0.0, 0.0],  # Another frame from the same burst.
+        3: [0.79, 0.0, 0.61, 0.0],  # A similarly relevant but visually different frame.
+        4: [-1.0, 0.0, 0.0, 0.0],
+    }
+    with EmbeddingStore(tmp_path, dimensions=4) as store:
+        store.sync_assets([_asset(i) for i in vectors])
+        store.finish_jobs(
+            [
+                (job, serialize_float16_vector(vectors[job.asset_id], 4))
+                for job in store.claim_jobs(4)
+            ]
+        )
+    index = VectorIndex(tmp_path, dimensions=4)
+    search = SemanticSearch(index, FakeTextEncoder([1.0, 0.0, 0.0, 0.0]))
+    closest = search.search("winter landscape", limit=3)
+    varied = search.search("winter landscape", limit=3, variety=True)
+    assert [m.asset_id for m in closest] == [1, 2, 3]
+    assert [m.asset_id for m in varied] == [1, 3, 2]
+    assert [m.rank for m in varied] == [1, 2, 3]
+    assert {m.asset_id: m.score for m in varied} == {m.asset_id: m.score for m in closest}
+    assert search.search("winter landscape", limit=2, variety=True) == varied[:2]
+    assert search.search("winter landscape", limit=3, variety=True) == varied
+    assert len(search.search("winter landscape", limit=50, variety=True)) == 4
+    assert index.search_vector([1, 0, 0, 0], variety=True, exclude_asset_ids=(1, 2, 3, 4)) == []
+    assert [
+        m.asset_id
+        for m in index.search_vector([1, 0, 0, 0], variety=True, exclude_asset_ids=(1, 2, 4))
+    ] == [3]
+
+
+def test_variety_stays_within_the_closest_candidate_pool(tmp_path: Path) -> None:
+    with EmbeddingStore(tmp_path, dimensions=4) as store:
+        store.sync_assets([_asset(i) for i in range(1, 502)])
+        store.finish_jobs(
+            [
+                (
+                    job,
+                    serialize_float16_vector(
+                        [0.8, 0.6, 0, 0] if job.asset_id <= 500 else [0.79, 0, 0.61, 0], 4
+                    ),
+                )
+                for job in store.claim_jobs(501)
+            ]
+        )
+    index = VectorIndex(tmp_path, dimensions=4)
+    matches = index.search_vector([1, 0, 0, 0], limit=4, variety=True)
+    assert [m.asset_id for m in matches] == [1, 2, 3, 4]
+
+
+def test_least_similar_ranks_the_entire_index_and_excludes_the_reference(tmp_path: Path) -> None:
+    _seed_vectors(tmp_path)
+    index = VectorIndex(tmp_path, dimensions=4)
+    closest = index.search_vector([1, 0, 0, 0], limit=2)
+    least = index.search_vector([1, 0, 0, 0], limit=2, order="least_similar")
+    assert [m.asset_id for m in closest] == [1, 3]
+    assert [m.asset_id for m in least] == [2, 3]
+    assert [m.asset_id for m in index.similar(1, order="least_similar")] == [2, 3]
+    assert least[0].score < least[1].score

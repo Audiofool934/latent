@@ -9,6 +9,10 @@ class ConfigurationError(LatentError):
     """Raised when a required local configuration value is unavailable."""
 
 
+class EmbeddingServiceError(ConfigurationError):
+    """An API failure that must leave unfinished embedding jobs recoverable."""
+
+
 class ArchiveSafetyError(LatentError):
     """Raised when a provider response could trigger an unsafe full download."""
 

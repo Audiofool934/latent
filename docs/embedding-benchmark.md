@@ -2,6 +2,11 @@
 
 Date: 2026-09-02
 
+> Historical record, retired on 2026-09-05.
+> Latent now uses Gemini Embedding 2 API.
+> The local runtime, model weights, and commands described below are no longer part of the active implementation.
+> See [Gemini embeddings](gemini-embeddings.md) for the current workflow.
+
 ## Decision
 
 推荐使用 `google/siglip2-base-patch16-224` 作为 Latent 第一版全库视觉与语义索引模型。

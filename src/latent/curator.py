@@ -1,4 +1,4 @@
-"""Deterministic curator observations grounded in local model and EXIF evidence."""
+"""Deterministic curator observations grounded in stored embeddings and EXIF evidence."""
 
 from __future__ import annotations
 

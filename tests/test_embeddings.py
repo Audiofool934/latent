@@ -140,7 +140,7 @@ def test_embedding_worker_resumes_without_reencoding_completed_vectors(tmp_path:
         }
         assert status["vectors"] == 3
         assert status["vector_bytes"] == 3 * 4 * 2
-        assert status["photo_network_bytes"] == 0
+        assert status["archive_network_bytes"] == 0
         assert status["archive_modified"] is False
 
 
@@ -294,7 +294,7 @@ def test_embedding_status_does_not_initialize_a_missing_store(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["exists"] is False
-    assert payload["photo_network_bytes"] == 0
+    assert payload["archive_network_bytes"] == 0
     assert not embedding_dir.exists()
 
 
@@ -344,7 +344,7 @@ def test_embedding_sync_cli_is_local_and_idempotent(
         "removed": 0,
         "unchanged": 0,
     }
-    assert first["status"]["photo_network_bytes"] == 0
+    assert first["status"]["archive_network_bytes"] == 0
     assert first["status"]["archive_modified"] is False
 
     assert main(arguments) == 0

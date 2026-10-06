@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 
@@ -15,7 +18,8 @@ from .embeddings import (
     EmbeddingWorker,
     load_embedding_assets,
 )
-from .errors import ConfigurationError, LatentError
+from .errors import ConfigurationError, EmbeddingServiceError, LatentError
+from .gemini import GEMINI_STORE_NAME, MAX_BATCH_SIZE, GeminiEmbeddingEncoder
 from .jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
 from .preview import MIB, ExifToolProbe, PreviewPipeline
 from .provider import (
@@ -24,7 +28,6 @@ from .provider import (
     CloudDriveCatalog,
     CloudDriveRangeSource,
 )
-from .search import DEFAULT_SIGLIP2_MODEL_CACHE
 from .storage import GIB, CacheManager, StateStore
 from .web_server import serve_library
 from .workspace import (
@@ -144,21 +147,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow binding to a non-loopback interface",
     )
-    serve.add_argument(
-        "--model-cache",
-        type=Path,
-        default=DEFAULT_SIGLIP2_MODEL_CACHE,
-    )
     serve.add_argument("--embedding-dir", type=Path)
     serve.add_argument(
         "--workspace-dir",
         type=Path,
         default=DEFAULT_WORKSPACE_DIR,
-    )
-    serve.add_argument(
-        "--semantic-device",
-        choices=("auto", "mps", "cpu"),
-        default="auto",
     )
     serve.set_defaults(handler=_run_serve)
 
@@ -183,33 +176,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     embedding_build = subparsers.add_parser(
         "embedding-build",
-        help="encode a bounded number of queued local contact images",
+        help="upload queued contact previews to Gemini and store image embeddings locally",
     )
     embedding_build.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     embedding_build.add_argument("--embedding-dir", type=Path)
     embedding_build.add_argument(
-        "--model-cache",
-        type=Path,
-        default=DEFAULT_SIGLIP2_MODEL_CACHE,
-    )
-    embedding_build.add_argument(
         "--max-jobs",
         type=_positive_int,
         required=True,
-        help="required safety cap; a full-library value needs prior resource approval",
+        help="maximum number of photos to upload to Gemini in this run",
     )
-    embedding_build.add_argument("--batch-size", type=_positive_int, default=8)
+    embedding_build.add_argument("--batch-size", type=_embedding_batch_size, default=32)
+    embedding_build.add_argument("--timeout-seconds", type=_positive_int, default=60)
+    embedding_build.add_argument("--progress", action="store_true")
+    embedding_build.add_argument("--workers", type=_embedding_workers, default=1)
     embedding_build.add_argument(
         "--max-consecutive-failures",
         type=_positive_int,
         default=5,
     )
     embedding_build.add_argument("--retry-failed", action="store_true")
-    embedding_build.add_argument(
-        "--device",
-        choices=("auto", "mps", "cpu"),
-        default="auto",
-    )
     embedding_build.add_argument("--json", action="store_true")
     embedding_build.set_defaults(handler=_run_embedding_build)
 
@@ -474,8 +460,6 @@ def _run_serve(args: argparse.Namespace) -> int:
         allow_remote=args.allow_remote,
         embedding_dir=args.embedding_dir,
         workspace_dir=args.workspace_dir,
-        model_cache=args.model_cache,
-        semantic_device=args.semantic_device,
     )
     return 0
 
@@ -500,7 +484,7 @@ def _run_embedding_status(args: argparse.Namespace) -> int:
             "model_id": DEFAULT_EMBEDDING_MODEL,
             "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
             "source": "local_contact_cache",
-            "photo_network_bytes": 0,
+            "archive_network_bytes": 0,
             "archive_modified": False,
         }
     else:
@@ -517,57 +501,111 @@ def _run_embedding_status(args: argparse.Namespace) -> int:
 
 def _run_embedding_build(args: argparse.Namespace) -> int:
     embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
-    model_cache = args.model_cache.expanduser().resolve()
-    if not model_cache.is_dir():
-        raise ConfigurationError(f"local SigLIP2 model cache was not found: {model_cache}")
     assets = load_embedding_assets(args.state_dir)
     with EmbeddingStore(embedding_dir) as store:
         sync = store.sync_assets(assets, retry_failed=args.retry_failed)
-        if store.job_counts()["pending"] == 0:
-            payload = {
-                "sync": sync.as_dict(),
-                "run": None,
-                "status": store.status(),
-            }
-        else:
-            try:
-                from .embedding_benchmark import SigLIP2Encoder, resolve_device
-
-                device = resolve_device(args.device)
-                encoder = SigLIP2Encoder(
-                    cache_dir=model_cache,
-                    device=device,
-                    local_files_only=True,
-                )
-            except ModuleNotFoundError as error:
-                raise ConfigurationError(
-                    "embedding runtime is not installed; use the isolated embedding environment"
-                ) from error
-            except (OSError, RuntimeError) as error:
-                raise ConfigurationError(
-                    f"local SigLIP2 model could not be loaded: {error}"
-                ) from error
-            run = EmbeddingWorker(
-                store,
-                encoder,
-                args.state_dir / "cache",
-            ).run(
-                max_jobs=args.max_jobs,
-                batch_size=args.batch_size,
-                max_consecutive_failures=args.max_consecutive_failures,
-                retry_failed=args.retry_failed,
-            )
-            payload = {
-                "sync": sync.as_dict(),
-                "run": {
-                    **run.as_dict(),
-                    "device": device,
-                    "model_load_seconds": encoder.load_seconds,
-                },
-                "status": store.status(),
-            }
+        counts = store.job_counts()
+        pending = counts["pending"] + counts["running"]
+    run = _run_api_workers(args, embedding_dir) if pending else None
+    with EmbeddingStore(embedding_dir) as store:
+        payload = {"sync": sync.as_dict(), "run": run, "status": store.status()}
     _print_embedding_payload(payload, as_json=args.json)
-    return 0
+    if run is not None and run["provider_errors"]:
+        return 2
+    return 1 if run is not None and run["failed"] else 0
+
+
+def _run_api_workers(args: argparse.Namespace, embedding_dir: Path) -> dict[str, object]:
+    count = min(args.workers, args.max_jobs)
+    budgets = [args.max_jobs // count + (i < args.max_jobs % count) for i in range(count)]
+    stop = threading.Event()
+    lock = threading.Lock()
+    reports: dict[int, dict[str, object]] = {}
+    usage: dict[int, dict[str, int | float]] = {}
+    provider_errors: list[str] = []
+    started = time.monotonic()
+    last_progress = 0.0
+
+    def combined() -> dict[str, object]:
+        fields = (
+            "processed",
+            "succeeded",
+            "failed",
+            "recovered_jobs",
+            "requeued_failed_jobs",
+            "vector_bytes_written",
+            "batch_fallbacks",
+        )
+        result = {key: sum(int(r[key]) for r in reports.values()) for key in fields}
+        result.update(
+            {
+                key: sum(u[key] for u in usage.values())
+                for key in (
+                    "api_requests",
+                    "image_submissions",
+                    "photo_upload_bytes",
+                    "request_body_bytes",
+                    "input_tokens",
+                    "estimated_image_cost_usd",
+                )
+            }
+        )
+        return {
+            **result,
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "workers": count,
+            "provider": "gemini_api",
+            "archive_network_bytes": 0,
+            "archive_modified": False,
+            "failures": [f for r in reports.values() for f in r["failures"]],
+        }
+
+    def work(index: int, budget: int) -> None:
+        nonlocal last_progress
+        encoder = GeminiEmbeddingEncoder(timeout_seconds=args.timeout_seconds)
+
+        def report(result, *, final=False):
+            nonlocal last_progress
+            with lock:
+                reports[index] = result.as_dict()
+                usage[index] = encoder.usage()
+                now = time.monotonic()
+                if args.progress and (now - last_progress >= 5 or final):
+                    print(json.dumps({"progress": combined()}), file=sys.stderr, flush=True)
+                    last_progress = now
+
+        try:
+            with EmbeddingStore(embedding_dir) as store:
+                result = EmbeddingWorker(store, encoder, args.state_dir / "cache").run(
+                    max_jobs=budget,
+                    batch_size=args.batch_size,
+                    max_consecutive_failures=args.max_consecutive_failures,
+                    progress=report,
+                    stop_requested=stop.is_set,
+                )
+                report(result, final=True)
+        except BaseException:
+            stop.set()
+            with lock:
+                usage[index] = encoder.usage()
+                if args.progress:
+                    print(json.dumps({"progress": combined()}), file=sys.stderr, flush=True)
+            raise
+
+    # Each thread owns its SQLite connection and encoder; claims remain transactional.
+    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="latent-gemini") as pool:
+        futures = [pool.submit(work, i, budget) for i, budget in enumerate(budgets)]
+        try:
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except EmbeddingServiceError as error:
+                    provider_errors.append(str(error))
+                    stop.set()
+        except BaseException:
+            stop.set()
+            raise
+    return {**combined(), "provider_errors": provider_errors}
 
 
 def _run_workspace_status(args: argparse.Namespace) -> int:
@@ -631,7 +669,7 @@ def _run_workspace_import(args: argparse.Namespace) -> int:
 def _embedding_dir(state_dir: Path, requested: Path | None) -> Path:
     if requested is not None:
         return requested.expanduser().resolve()
-    return state_dir.expanduser().resolve() / "embeddings/siglip2-base"
+    return state_dir.expanduser().resolve() / "embeddings" / GEMINI_STORE_NAME
 
 
 def _print_embedding_payload(payload: dict[str, object], *, as_json: bool) -> None:
@@ -652,10 +690,9 @@ def _print_embedding_payload(payload: dict[str, object], *, as_json: bool) -> No
             f"{run['processed']} processed, {run['succeeded']} succeeded, "
             f"{run['failed']} failed"
         )
-        print(
-            f"Local contacts only: {run['photo_network_bytes']} photo network bytes, "
-            "archive modified: no"
-        )
+        print(f"Gemini photo uploads: {run['photo_upload_bytes']} bytes, archive modified: no")
+        for error in run.get("provider_errors", []):
+            print(f"Embedding paused: {error}")
     status = payload.get("status")
     if isinstance(status, dict):
         _print_embedding_status(status)
@@ -672,7 +709,7 @@ def _print_embedding_status(payload: dict[str, object]) -> None:
         f"{jobs['succeeded']} succeeded, {jobs['failed']} failed"
     )
     print(f"Vectors: {payload['vectors']}, {_format_bytes(int(payload['vector_bytes']))}")
-    print("Photo network: 0 B; archive modified: no")
+    print("Embedding provider: Gemini API; archive reads: 0 B; archive modified: no")
 
 
 def _print_spike(payload: dict[str, object]) -> None:
@@ -738,6 +775,20 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.2f} {unit}"
         amount /= 1024
     raise AssertionError("unreachable")
+
+
+def _embedding_batch_size(value: str) -> int:
+    count = _positive_int(value)
+    if count > MAX_BATCH_SIZE:
+        raise argparse.ArgumentTypeError(f"batch size must be at most {MAX_BATCH_SIZE}")
+    return count
+
+
+def _embedding_workers(value: str) -> int:
+    count = _positive_int(value)
+    if count > 8:
+        raise argparse.ArgumentTypeError("workers must be at most 8")
+    return count
 
 
 if __name__ == "__main__":
