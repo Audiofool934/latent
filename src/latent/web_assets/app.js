@@ -33,6 +33,7 @@ const elements = {
   inspectorTitle: document.querySelector("#inspectorTitle"),
   inspectorNewSequenceButton: document.querySelector("#inspectorNewSequenceButton"),
   librarySearch: document.querySelector("#librarySearch"),
+  librarySearchLabel: document.querySelector("#librarySearchLabel"),
   loadingLabel: document.querySelector("#loadingLabel"),
   loadMoreButton: document.querySelector("#loadMoreButton"),
   loadingState: document.querySelector("#loadingState"),
@@ -56,6 +57,11 @@ const elements = {
   readyJobCount: document.querySelector("#readyJobCount"),
   relationEvidence: document.querySelector("#relationEvidence"),
   resultModeLabel: document.querySelector("#resultModeLabel"),
+  searchCoverage: document.querySelector("#searchCoverage"),
+  searchCoverageBar: document.querySelector("#searchCoverageBar"),
+  searchCoverageCount: document.querySelector("#searchCoverageCount"),
+  searchCoverageState: document.querySelector("#searchCoverageState"),
+  searchVarietyButton: document.querySelector("#searchVarietyButton"),
   sequenceCancelButton: document.querySelector("#sequenceCancelButton"),
   sequenceDialog: document.querySelector("#sequenceDialog"),
   sequenceDialogTitle: document.querySelector("#sequenceDialogTitle"),
@@ -94,6 +100,7 @@ const state = {
   requestSerial: 0,
   sequences: [],
   selectedIndex: -1,
+  searchVariety: false,
   total: 0,
   workspaceWritable: false,
 };
@@ -102,6 +109,9 @@ const PAGE_SIZE = 250;
 const SEARCH_DELAY_MS = 180;
 let searchTimer = null;
 let paginationObserver = null;
+let embeddingPollTimer = null;
+let embeddingPollController = null;
+let libraryLoaded = false;
 
 async function requestJSON(url, signal = undefined) {
   const response = await fetch(url, {
@@ -138,13 +148,10 @@ async function boot() {
     elements.cachedAssetCount.textContent = String(library.cached_assets);
     elements.readyJobCount.textContent = String(library.preview_jobs.succeeded);
     elements.queuedJobCount.textContent = String(library.preview_jobs.pending);
-    state.embeddingCount = library.embedding_index?.indexed_assets || 0;
     state.workspaceWritable = library.workspace?.writable === true;
-    elements.embeddingReadyCount.textContent = String(state.embeddingCount);
-    elements.discoverMotifsButton.disabled = state.embeddingCount === 0;
-    elements.toolbarMotifsButton.disabled = state.embeddingCount === 0;
-    elements.motifEmpty.textContent =
-      state.embeddingCount === 0 ? "Embedding index required" : "No motifs loaded";
+    updateEmbeddingProgress(library.embedding_index);
+    libraryLoaded = true;
+    startEmbeddingPolling();
     renderDates();
     renderMotifs();
     try {
@@ -161,6 +168,7 @@ async function boot() {
     const requestedMotif = parameters.get("motif");
     const requestedSequence = parameters.get("sequence");
     const requestedQuery = (parameters.get("q") || "").trim();
+    state.searchVariety = parameters.get("variety") === "1";
     const initialDate = state.dates.some((item) => item.capture_date === requested)
       ? requested
       : state.dates[0]?.capture_date;
@@ -188,9 +196,99 @@ async function boot() {
   }
 }
 
+function updateEmbeddingProgress(progress) {
+  if (!progress) return;
+  const before = state.embeddingCount;
+  state.embeddingCount = progress.indexed_assets || 0;
+  const count = state.embeddingCount.toLocaleString("en-US");
+  const total = progress.total_assets || 0;
+  elements.embeddingReadyCount.textContent = count;
+  elements.searchCoverageCount.textContent =
+    `${count} / ${total.toLocaleString("en-US")} searchable`;
+  elements.searchCoverageBar.max = Math.max(total, 1);
+  elements.searchCoverageBar.value = state.embeddingCount;
+  elements.searchCoverage.dataset.phase = progress.phase;
+  const labels = {
+    indexing: "Indexing",
+    paused: "Indexing paused",
+    needs_attention: "Needs attention",
+    not_started: total > 0 ? "Not indexed yet" : "No photos yet",
+    complete: "Complete",
+    unavailable: "Status unavailable",
+  };
+  elements.searchCoverageState.textContent = labels[progress.phase] || "Status unavailable";
+  const searchLabel = progress.phase === "complete"
+    ? "Search all photos by meaning"
+    : "Search indexed photos by meaning";
+  elements.librarySearch.placeholder = progress.phase === "complete"
+    ? "Search all photos"
+    : "Search indexed photos";
+  elements.librarySearchLabel.textContent = searchLabel;
+  // Do not disturb controls while a user is requesting motifs or curator evidence.
+  if (before === 0 || state.embeddingCount === 0) {
+    elements.discoverMotifsButton.disabled = state.embeddingCount === 0;
+    elements.toolbarMotifsButton.disabled = state.embeddingCount === 0;
+    const selected = state.assets[state.selectedIndex];
+    elements.findSimilarButton.disabled = state.embeddingCount === 0 || !selected?.id;
+    elements.curatorButton.disabled = state.embeddingCount === 0 || !selected?.id;
+  }
+  if (state.motifs.length === 0) {
+    elements.motifEmpty.textContent =
+      state.embeddingCount === 0 ? "Embedding index required" : "No motifs loaded";
+  }
+}
+
+async function refreshEmbeddingProgress() {
+  if (!libraryLoaded || document.hidden || embeddingPollController) return;
+  const controller = new AbortController();
+  embeddingPollController = controller;
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
+  try {
+    updateEmbeddingProgress(await requestJSON("/api/embedding-status", controller.signal));
+  } catch {
+    if (!document.hidden) {
+      elements.searchCoverage.dataset.phase = "unavailable";
+      elements.searchCoverageState.textContent = "Status unavailable";
+    }
+  } finally {
+    window.clearTimeout(timeout);
+    embeddingPollController = null;
+  }
+}
+
+function startEmbeddingPolling() {
+  if (!libraryLoaded || embeddingPollTimer !== null || document.hidden) return;
+  embeddingPollTimer = window.setInterval(() => void refreshEmbeddingProgress(), 10000);
+}
+
+function stopEmbeddingPolling() {
+  window.clearInterval(embeddingPollTimer);
+  embeddingPollTimer = null;
+  embeddingPollController?.abort();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopEmbeddingPolling();
+  } else {
+    startEmbeddingPolling();
+    void refreshEmbeddingProgress();
+  }
+});
+window.addEventListener("pagehide", stopEmbeddingPolling);
+window.addEventListener("pageshow", () => {
+  startEmbeddingPolling();
+  void refreshEmbeddingProgress();
+});
+
 function renderDates() {
   elements.dateList.replaceChildren();
   elements.mobileDateSelect.replaceChildren();
+  const allDates = document.createElement("option");
+  allDates.value = "";
+  allDates.textContent = "All dates";
+  allDates.disabled = true;
+  elements.mobileDateSelect.append(allDates);
   for (const item of state.dates) {
     const button = document.createElement("button");
     button.type = "button";
@@ -354,14 +452,19 @@ function updateDateChrome() {
     ? new Intl.DateTimeFormat("en", { day: "2-digit", month: "long", year: "numeric" }).format(date)
     : "Contact Sheet";
   elements.resultModeLabel.textContent = "Embedded RAW previews";
+}
+
+function updateDateNavigation() {
+  // Keep currentDate as the return destination when leaving a global result view.
+  const selectedDate = state.mode === "date" ? state.currentDate : null;
   for (const button of elements.dateList.querySelectorAll(".date-button")) {
-    if (button.dataset.date === state.currentDate) {
+    if (button.dataset.date === selectedDate) {
       button.setAttribute("aria-current", "date");
     } else {
       button.removeAttribute("aria-current");
     }
   }
-  elements.mobileDateSelect.value = state.currentDate || "";
+  elements.mobileDateSelect.value = selectedDate || "";
 }
 
 function appendCards(startIndex) {
@@ -447,11 +550,17 @@ async function resetResults(query) {
     url.searchParams.set("q", query);
     url.searchParams.delete("motif");
     url.searchParams.delete("sequence");
+    if (state.searchVariety) {
+      url.searchParams.set("variety", "1");
+    } else {
+      url.searchParams.delete("variety");
+    }
     updateSemanticChrome(query);
   } else {
     url.searchParams.delete("motif");
     url.searchParams.delete("q");
     url.searchParams.delete("sequence");
+    url.searchParams.delete("variety");
     updateDateChrome();
   }
   window.history.replaceState({}, "", url);
@@ -480,6 +589,9 @@ function prepareResults(mode, query) {
   state.hasMore = mode === "date";
   state.loading = false;
   state.mode = mode;
+  updateDateNavigation();
+  elements.searchVarietyButton.hidden = mode !== "semantic";
+  elements.searchVarietyButton.setAttribute("aria-pressed", String(state.searchVariety));
   if (mode !== "motif") {
     state.activeMotifId = null;
   }
@@ -493,7 +605,7 @@ function prepareResults(mode, query) {
   elements.loadingState.hidden = false;
   const loadingLabels = {
     date: "Reading local index",
-    semantic: "Loading local model / searching embeddings",
+    semantic: "Searching with Gemini",
     sequence: "Opening writable workspace",
     similar: "Finding visual neighbors",
     motif: "Clustering local embeddings",
@@ -511,7 +623,9 @@ function prepareResults(mode, query) {
 function updateSemanticChrome(query) {
   elements.dateBreadcrumb.textContent = "SEMANTIC / ALL DATES";
   elements.dateTitle.textContent = `“${query}”`;
-  elements.resultModeLabel.textContent = "SigLIP2 cosine search";
+  elements.resultModeLabel.textContent = state.searchVariety
+    ? "Wider visual range"
+    : "Gemini semantic search";
 }
 
 async function openSequence(sequenceId) {
@@ -689,6 +803,7 @@ async function loadSemanticResults() {
   state.loading = true;
   try {
     const parameters = new URLSearchParams({ q: state.query, limit: "100" });
+    if (state.searchVariety) parameters.set("variety", "1");
     const payload = await requestJSON(
       `/api/search?${parameters.toString()}`,
       state.controller?.signal,
@@ -891,7 +1006,7 @@ async function loadCurator() {
   elements.curatorButton.disabled = true;
   elements.curatorButton.textContent = "Reading evidence";
   elements.curatorReport.hidden = false;
-  elements.curatorHeadline.textContent = "Reading local model and EXIF evidence";
+  elements.curatorHeadline.textContent = "Reading embedding and EXIF evidence";
   elements.curatorObservations.replaceChildren();
   elements.curatorSequence.textContent = "";
   elements.curatorLimitations.textContent = "";
@@ -944,7 +1059,7 @@ async function findSimilar() {
   elements.librarySearch.value = "";
   elements.dateBreadcrumb.textContent = `SIMILAR / ${source.name.replace(/\.ARW$/i, "")}`;
   elements.dateTitle.textContent = "Visual Neighbors";
-  elements.resultModeLabel.textContent = "SigLIP2 image cosine";
+  elements.resultModeLabel.textContent = "Gemini visual similarity";
   const url = new URL(window.location.href);
   url.searchParams.delete("motif");
   url.searchParams.delete("q");
@@ -1207,6 +1322,12 @@ async function copyArchivePath() {
 }
 
 elements.librarySearch.addEventListener("input", scheduleSearch);
+elements.searchVarietyButton.addEventListener("click", () => {
+  if (state.mode !== "semantic" || !state.query) return;
+  window.clearTimeout(searchTimer);
+  state.searchVariety = !state.searchVariety;
+  void resetResults(elements.librarySearch.value.trim());
+});
 elements.loadMoreButton.addEventListener("click", () => void loadNextPage());
 elements.mobileDateSelect.addEventListener("change", (event) => loadDate(event.target.value));
 elements.inspectorClose.addEventListener("click", () => closeInspector());

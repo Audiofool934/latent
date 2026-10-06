@@ -70,7 +70,7 @@
             <span class="status-dot" aria-hidden="true"></span>
             <span>LOCAL INDEX</span>
           </div>
-          <div class="status-caption">Cloud access disabled</div>
+          <div class="status-caption">Archive read-only / Gemini search</div>
         </footer>
       </aside>
 
@@ -83,6 +83,17 @@
               <span id="frameCount">0 frames</span>
               <span aria-hidden="true">/</span>
               <span id="resultModeLabel">Embedded RAW previews</span>
+              <button class="text-button search-variety-button" id="searchVarietyButton"
+                type="button" aria-pressed="false" hidden
+                title="Show a wider visual range among the closest matches">More variety</button>
+            </div>
+            <div class="search-coverage" id="searchCoverage" data-phase="loading">
+              <div class="coverage-copy" role="status" aria-live="polite">
+                <span id="searchCoverageCount">Checking search coverage</span>
+                <span id="searchCoverageState"></span>
+              </div>
+              <progress id="searchCoverageBar" max="1" value="0"
+                aria-label="Photos available for semantic search"></progress>
             </div>
           </div>
           <div class="toolbar">
@@ -97,11 +108,11 @@
             <select id="mobileMotifSelect" class="mobile-motif-select" hidden></select>
             <label class="search-field" for="librarySearch">
               <span class="search-icon" aria-hidden="true">/</span>
-              <span class="visually-hidden">Search all photos by meaning</span>
+              <span class="visually-hidden" id="librarySearchLabel">Search indexed photos by meaning</span>
               <input
                 id="librarySearch"
                 type="search"
-                placeholder="Search all photos by meaning"
+                placeholder="Search indexed photos"
                 maxlength="200"
                 autocomplete="off"
                 spellcheck="false"

@@ -361,10 +361,70 @@ button {
 
 .title-meta {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 9px;
   letter-spacing: 0.04em;
+}
+
+.search-variety-button {
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+.search-variety-button[aria-pressed="true"] {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.title-block {
+  min-width: 0;
+}
+
+.search-coverage {
+  margin-top: 12px;
+  max-width: 340px;
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.coverage-copy {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 14px;
+}
+
+.search-coverage progress {
+  display: block;
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  margin-top: 7px;
+  border: 0;
+  background: var(--line);
+  accent-color: var(--signal);
+}
+
+.search-coverage progress::-webkit-progress-bar {
+  background: var(--line);
+}
+
+.search-coverage progress::-webkit-progress-value {
+  background: var(--signal);
+}
+
+.search-coverage progress::-moz-progress-bar {
+  background: var(--signal);
+}
+
+.search-coverage[data-phase="paused"] #searchCoverageState,
+.search-coverage[data-phase="needs_attention"] #searchCoverageState,
+.search-coverage[data-phase="unavailable"] #searchCoverageState {
+  color: var(--danger);
 }
 
 .toolbar {
