@@ -7,19 +7,30 @@ Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
 
 项目当前已完成 Phase 0，并进入 Phase 1 的 Library slice。
 Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
-本地只读 contact sheet 已可从 SQLite 与缓存直接运行，最终桌面 GUI 技术栈仍保持开放。
+桌面 GUI 已确定采用 SwiftUI + AppKit，首个原生 macOS 客户端已接入现有本地 Python 服务。
+原生图库采用保留照片完整比例的 masonry 排布、明确标注的侧栏、常显文件名与日期，以及底部照片详情。
+macOS 26 的原生材质与圆角仅用于导航和操作区域，让照片保持视觉主体。
+构建、运行、性能测量与已验证范围见 [native macOS client](docs/native-macos.md)。
 首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
 高容量日期按 250 张一批增量加载，不受单页上限影响。
-本地图文 embedding 小样本基准已经完成，SigLIP2 base 是当前的中英文语义检索模型。
-跨日期语义搜索、相似照片 API 和对应界面已经在 3 张真实 contact preview 的隔离向量库上跑通。
+图片和文字 embedding 已全面切换到 Gemini Embedding 2 API，默认使用 3,072 维向量。
+API 图片编码只上传已有的 512 px contact JPEG，文字搜索只发送查询文字；向量、排序和聚类继续保存在本地。
+语义搜索提供可选的 `More variety`，在保留最佳匹配的同时降低相似连拍在前排结果中的占比；关闭后恢复原始相关度排序。
 Grounded Curator 已能解释单图视觉邻域，并生成无标签的全库视觉 motif、跨年份证据和 Sequence seed，不生成地点、身份或故事。
-独立 writable workspace 已具备持久化 Sequence、稳定档案引用、顺序修改、服务重启恢复、网页交互和非覆盖式导入导出契约。
-正式图库仍保持 25,793 个 pending、0 个 vector，全库索引等待资源预算确认。
+独立 writable workspace 已具备持久化 Sequence、星级、caption、稳定档案引用和非覆盖式导入导出契约。
+原生客户端支持自选图库输入和成片输出目录、本地磁盘或网盘挂载、多选编辑批次、PhotoLab 10 交接，以及按原始目录保存勾选成片。
+Locations 还可将多层 Sequence 导出为指向原片的软链接目录，不复制照片。
+使用流程和验证边界见 [archived-photo editing](docs/archived-photo-editing.md)。
+旧 CloudDrive 图库遗漏的独立 JPEG 可用 [JPEG 补入流程](docs/jpeg-backfill.md) 增量加入，通过云端预览和有界 EXIF 读取避免整张下载原片。
+全库 Gemini 索引已于 2026-10-01 核验完成：25,793 张照片全部具有有效向量，没有待处理、运行中或失败的任务。
+索引支持增量构建和断点续跑，Library 页面每 10 秒更新可搜索照片数量与索引状态。
+只有覆盖全部照片时，搜索框才显示 “Search all photos”。
+当前运行信息与接续入口见 [project status](docs/project-status.md)，命令行可用 `latent embedding-status` 查看实时队列。
 
 ## Phase 0 spike
 
-当前代码只验证底层数据链路，不代表最终桌面应用会使用 Python 构建界面。
-CloudDrive 适配器与预览管线保持隔离，因此后续可以由 SwiftUI、Tauri 或其他 GUI 调用同一契约。
+Phase 0 验证底层数据链路，当前 SwiftUI + AppKit 界面通过本地 HTTP 契约复用 Python 数据服务。
+CloudDrive 适配器与预览管线保持隔离，图库浏览只读取已经生成的本地缓存。
 
 本机准备：
 
@@ -38,6 +49,7 @@ uv run latent work --max-jobs 25
 uv run latent status
 uv run latent embedding-status
 uv run latent embedding-sync
+uv run latent embedding-build --max-jobs 64 --batch-size 32 --progress
 uv run latent workspace-status
 uv run latent workspace-export --output ./latent-workspace.json
 uv run latent workspace-import --input ./latent-workspace.json
@@ -45,16 +57,22 @@ uv run latent serve
 uv run pytest
 ```
 
-语义查询需要先用 `uv sync --group embedding-bench` 安装本地 SigLIP2 runtime。
-服务只从已经下载的模型目录加载，不会在查询时联网下载模型。
+图片索引和语义查询读取进程环境中的 `GEMINI_API_KEY`，也兼容 `GOOGLE_API_KEY`。
+密钥不写入项目、数据库、HTTP 响应或日志。
+当前环境不再安装 PyTorch、Transformers 或本地模型权重。
 
 默认状态保存在 `~/Library/Application Support/Latent/phase0/`。
 CloudDrive device token 只从应用自己的本地 plist 读取到内存，不会写入项目、SQLite、缓存文件或命令输出。
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
-本地图文模型的质量、性能与资源证据见 [embedding benchmark](docs/embedding-benchmark.md)。
+当前 API 契约、费用和迁移记录见 [Gemini embeddings](docs/gemini-embeddings.md)。
+退休本地模型的历史测量保留在 [embedding benchmark](docs/embedding-benchmark.md)。
 用户创作状态的持久化与交换契约见 [writable workspace](docs/writable-workspace.md)。
-`latent serve` 默认只监听 `127.0.0.1:8765`，并且服务进程没有 CloudDrive 客户端，因此浏览界面只会读取本地索引与派生缓存。
+`latent serve` 默认只监听 `127.0.0.1:8765`，日期浏览与相似照片只读取本地数据；自然语言搜索会请求 Gemini API 生成查询向量。
+新编辑流程只在明确操作时读取输入目录并写入选择的输出目录，保留原片层级，遇到不同内容的同名文件则另存版本。
+输入输出相同或输出包含输入时使用 `_Latent Edits`，扫描排除输出和工作副本目录。
+写入挂载目录后的云端同步由 CloudDrive2 负责，Latent 保留全部工作文件。
+已有 CloudDrive 图库可连接对应挂载目录并保留索引，旧回传批次继续支持原有的显式恢复和校验流程。
 `scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
 只有明确传入 `--include-hidden` 才会遍历这些目录。
 `work` 在启动时按目录中的拍摄日期重新排列 pending job，较新的日期优先。
@@ -80,14 +98,14 @@ Latent 不是另一个备份客户端、通用相册管理器或 RAW 编辑器�
 
 ## Experience
 
-主界面采用三栏 GUI：
+当前原生主界面采用以照片为中心的 masonry 图库：
 
-- 左侧是 Library、时间线、筛选器和已保存的 Sequence。
-- 中央是以照片为主角的 contact sheet、单图预览和自由编排画布。
-- 右侧是 EXIF、来源、关联照片、策展解释和当前 Sequence。
+- 左侧以文字明确标注 Library、日期档案和已保存的 Sequence。
+- 中央按最小列宽自适应排列照片，每张照片保留自身宽高比，文件名与日期始终显示。
+- 底部常显所选照片的拍摄时间、相机、镜头和来源操作，并提供相似照片与加入 Sequence 的入口。
 
-视觉语言来自深色 TUI：克制、精确、信息密度高。
-键盘不是另一套界面，而是 GUI 的加速层，包括 command palette、全局搜索、快速评分与加入 Sequence。
+视觉语言保留深色档案工具的克制与精确，导航和操作使用系统原生 Liquid Glass 材质与圆角。
+键盘作为 GUI 的加速层，目前支持搜索、刷新、调整缩略图大小、方向键选择和 Space 单图预览。
 
 AI 不以聊天窗口作为主要形态。
 它嵌入搜索结果、关系解释、主题聚类和 Sequence 建议中，并且每个判断都能回到具体照片与元数据。
@@ -203,11 +221,12 @@ MVP 包含：
 
 ### Phase 1: Library and discovery MVP
 
-完成真实档案索引、contact sheet、inspector、SigLIP2 embedding、跨日期语义搜索、相似照片、受约束 Curator 和 Sequence。
+完成真实档案索引、contact sheet、inspector、Gemini API embedding、跨日期语义搜索、相似照片、受约束 Curator 和 Sequence。
 日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
 完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
 日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
-embedding queue、语义搜索、相似照片、grounded Curator、跨年份 motif 和 Sequence 链路已经完成有界验证，全库向量构建仍等待资源确认。
+embedding queue、语义搜索、相似照片、grounded Curator、跨年份 motif 和 Sequence 链路已经完成有界验证。
+全库 Gemini API 向量构建已完成；当前 12 个视觉 motif 覆盖全部照片，其中 10 个同时包含 2025 和 2026 年的照片。
 
 ### Phase 2: Curator expansion
 
@@ -222,7 +241,7 @@ embedding queue、语义搜索、相似照片、grounded Curator、跨年份 mot
 - 原生 SwiftUI、Tauri 或其他 macOS 桌面技术栈
 - CloudDrive API 的稳定接入与凭证边界
 - 8 GB 默认缓存是否需要按磁盘空间动态调整
-- 全库 embedding 的调度与可接受资源窗口
+- 新增照片的增量 API 索引调度与月度费用预算
 - Curator 输出的保存、重算与版本边界
 - Writable workspace 的自动备份频率与目标位置
 - Sequence 的衍生导出目标与跨设备同步边界

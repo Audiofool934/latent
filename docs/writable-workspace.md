@@ -1,6 +1,6 @@
 # Writable workspace contract
 
-Date: 2026-09-04
+Updated: 2026-10-04
 
 ## Outcome
 
@@ -11,11 +11,29 @@ Latent 的用户创作状态已经与可重建 Library 索引物理分离。
 第一版 store 支持：
 
 - 创建、命名和注释 Sequence
+- 用户自定义的多层文件夹分类，以及跨层移动
 - 把一个或多个档案资产加入 Sequence
 - 保持每个 Sequence 内稳定且连续的照片顺序
 - 完整重排和单项移除
 - 原子 JSON 导出
 - 非覆盖式 merge import
+- 独立持久化星级、caption，以及 `unmarked`、`pick`、`reject` 三种标记
+
+Schema 3 在现有 `photo_annotations` 表中增加 `flag` 字段。
+旧记录默认 `unmarked`，原有星级、caption 和 Sequence 保持不变。
+标记、星级与 caption 按字段独立更新，Reject 不删除原图或 workspace 引用。
+导出包含标记，导入继续兼容 schema 1、2、3、4，旧导入文件缺少标记时默认为 `unmarked`。
+
+## Sequence folder hierarchy
+
+Schema 4 新增 `sequence_folders`，通过 `parent_id` 保存父子关系，并为 `sequences` 增加可空的 `folder_id`。
+空父级表示根目录，已有 Sequence 升级后保留在根目录。
+文件夹名称由用户决定，名称可以重复，UUID 用于区分节点。
+创建和移动都会验证父级存在，移动在 `BEGIN IMMEDIATE` 事务内检查祖先链，禁止自身或后代成为父级。
+删除文件夹会在同一个事务中把直接子文件夹与 Sequence 提升到原父级，不删除 Sequence 或照片引用。
+层级深度不设固定上限；遍历和导入排序使用迭代方式，并验证无环关系。
+导出包含平面的文件夹列表及父级引用，导入先验证完整树和 Sequence 所属关系，再按父级先于子级的顺序写入。
+已存在且内容不同的文件夹 ID 保持本地内容，使用与 Sequence 相同的非覆盖导入原则。
 
 ## Stable archive reference
 
@@ -39,7 +57,7 @@ Sequence 和 item 写入使用事务。
 
 ## Export and import
 
-导出格式包含 format、schema version、exported time、Sequence metadata 和全部 item reference。
+导出格式包含 format、schema version、exported time、文件夹层级、Sequence metadata 和全部 item reference。
 文件先写入同目录临时文件，执行 flush 与 fsync，再通过原子 replace 更新目标路径。
 导出文件权限设为 `0600`。
 
@@ -63,7 +81,10 @@ uv run latent workspace-import --input ./latent-workspace.json --json
 ## HTTP and interface evidence
 
 Loopback 服务已经提供 Sequence list、detail、create、update、add items、reorder、remove item 和 delete API。
-所有 mutation 都要求 `application/json`，body 上限为 64 KiB。
+`GET /api/sequences` 同时返回文件夹列表。
+`POST /api/sequence-folders` 创建文件夹，`PATCH` 支持独立改名或移动，`DELETE` 执行保留内容的文件夹移除。
+Sequence 的 `PATCH` 接受 `folder_id`，显式传入 `null` 表示移动到根目录。
+Workspace mutation 都要求 `application/json`，body 上限为 64 KiB。
 服务绑定非 loopback 地址时，即使用户显式允许远程浏览，也会禁用 workspace mutation。
 
 网页已完成以下真实手势路径：
