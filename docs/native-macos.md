@@ -354,9 +354,9 @@ The full Release run below includes the current Archive and Sequence-folder cove
 
 | October 4 local run | Exact command from the repository root | Result |
 | --- | --- | --- |
-| Before repair | `scripts/test-macos.sh --filter GalleryOwnershipTests > var/native-ownership-repair-20261004/baseline.log 2>&1` | Compile failure reproduced, exit 1 |
-| Focused after repair | `scripts/test-macos.sh --filter GalleryOwnershipTests > var/native-ownership-repair-20261004/focused.log 2>&1` | 2 tests in 1 suite passed, exit 0 |
-| Full after repair | `scripts/test-macos.sh -c release > var/native-ownership-repair-20261004/full-release.log 2>&1` | 113 tests in 13 suites passed, exit 0 |
+| Before repair | `scripts/test-macos.sh --filter GalleryOwnershipTests` | Compile failure reproduced, exit 1 |
+| Focused after repair | `scripts/test-macos.sh --filter GalleryOwnershipTests` | 2 tests in 1 suite passed, exit 0 |
+| Full after repair | `scripts/test-macos.sh -c release` | 113 tests in 13 suites passed, exit 0 |
 
 The production release build compiles and is ad hoc signed successfully.
 Annotation regressions include rapid per-photo edits, failures and retry, disk failure, interrupted requests and restoration, stale reads, Starred selection, concurrent sequence saves, and bounded bulk requests.
@@ -373,11 +373,8 @@ The test script supplies the bundled Swift Testing framework paths when using Co
 
 The 2026-10-01 native UI checks exercised semantic searches, both result orderings, mouse and keyboard photo selection, proportional preview navigation, similarity search, sequence creation/addition/reordering/renaming, restart persistence, date pagination, window resizing, and thumbnail resizing.
 The rendered gallery was inspected at approximately 1291 x 949 and 972 x 692 points, including mixed landscape and portrait photos.
-Sequence mutations used a separate workspace at `var/native-verification/workspace` on test port 8876.
+Sequence mutations used a separate temporary workspace on test port 8876.
 The normal workspace was checked afterward and still contained zero sequences.
-
-Local evidence lives in `var/native-verification/`, with build and test logs in `var/native-build.log` and `var/native-tests-release.log`.
-These ignored artifacts include private photo metadata and screenshots.
 The temporary test service and test app are stopped after verification.
 The normal app and the existing port-8766 library service can remain open for evaluation; Cmd-Q closes the app, and `tmux kill-session -t latent-library-server` stops that explicitly retained service.
 
@@ -402,14 +399,13 @@ After service activation, a generated 512-pixel image exercised a real Gemini qu
 The three orders returned 100 results each, closest and least-similar were correctly sorted and disjoint, and varied order retained the first closest match.
 Final read-only native checks against the real library verified the transparent search toolbar, inline preview, W/E navigation, and Space dismissal.
 The Archive hierarchy follow-up passed a release build and native visual checks of independent month expansion, month totals, initial selection visibility, and date navigation across months and years.
-Evidence, source snapshots, and the consistent workspace backup are under `var/workflow-qa-20261003/`.
-These ignored files can contain private metadata and should remain local.
+The consistent pre-migration workspace backup is kept under `var/backups/workflow-qa-20261003/`.
 
 The October 4 year/month navigation and Sequence deletion follow-up passed 137 Python tests and 117 native tests in 14 suites.
 Its native fixture verified direct year and month selection, independent disclosure arrows, cancellation, confirmed deletion, and return to the containing folder while all six original-file hashes and the other sequence stayed unchanged.
 The updated normal app displayed 7,536 photos for 2026 and 1,053 for August 2026, with 250-photo pagination.
 The existing 25,793-photo catalog, saved sequences, editing batch and locations were preserved through service activation.
-Source snapshots, local backups and verification logs are under `var/navigation-delete-20261004/`; the temporary app and service were stopped.
+Pre-change catalog and workspace backups are kept under `var/backups/navigation-delete-20261004/`; the temporary app and service were stopped.
 
 ## Remaining scope
 
@@ -418,7 +414,7 @@ Explicit ownership of a supplied Python runtime is supported as described above.
 Those workflows remain available through the existing web interface and CLI where already implemented.
 Future performance claims about continuous scrolling should use frame pacing and Instruments on the target machine, including memory pressure and cold-cache conditions.
 
-The October 4 folder verification used the isolated synthetic workspace under `var/sequence-hierarchy-20261004/`.
+The October 4 folder verification used an isolated synthetic workspace.
 Native UI checks created `Projects / Travel / 2026 / Mountain study`, renamed Travel to Journeys, restored the expanded hierarchy after restarting the app, collapsed and reopened the parent, added photos through the nested menu, and moved the sequence through the destination picker without changing its photo contents.
 Model tests cover 1,100 nested folders, sibling ordering, explicit JSON null when moving to the root, per-library expansion persistence, stale-library draft rejection, and ordered additions split into requests of at most 100 photos.
 Backend tests additionally cover concurrent moves, cycle rejection, folder removal preserving item order, schema 3 migration, and non-recursive import/export at 1,100 levels.

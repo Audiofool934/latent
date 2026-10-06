@@ -113,7 +113,6 @@ Inspect `latent embedding-status --json` for current completion instead of treat
 At background handoff, 1,984 of 25,793 vectors were stored and the remaining 23,809 jobs were pending, with no failed jobs.
 Four-worker generation encountered sustained HTTP 429 responses, including a single-image diagnostic request, and stopped cleanly with its remaining jobs pending.
 A single-image request succeeded again after cooling down, so the remaining build was resumed in tmux session `latent-gemini-index` with one worker and 32-photo requests.
-Progress and final results are written to `var/gemini-migration/conservative-progress.jsonl` and `var/gemini-migration/conservative-result.json` respectively.
 The tmux pane remains available after exit; if bounded retries are exhausted, inspect its exit status and logs before resuming the pending queue.
 The local Library server used `http://127.0.0.1:8765` at that handoff.
 

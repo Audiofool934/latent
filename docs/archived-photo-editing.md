@@ -135,14 +135,14 @@ No user archive photo was deleted for this test.
 The real interrupted editing batch was then verified through CloudDrive: all six uploaded sidecars and JPEGs matched their recorded cloud hashes.
 The formal Editing sheet displayed **Cloud copies verified**, and all eight local RAW, sidecar, and JPEG files retained their original SHA-256 values.
 The updated signed native app and port-8766 service use the existing library identity and all 25,793 catalog photos.
-Evidence is retained under `var/timeline-search-trash-20261004/`.
+Pre-change catalog and workspace backups are kept under `var/backups/timeline-search-trash-20261004/`.
 The three generated cloud files and their temporary root were removed after verification, with refreshed CloudDrive metadata confirming that the root was absent.
 The QA app and service exited; the formal native app and existing supervised library service remain running for use.
 
 ## Folder workflow verification
 
 The final change passed 134 Python tests, Ruff, and 113 native tests, including the real Swift-to-Python service ownership test.
-The isolated native run used three generated JPEG originals under `var/folder-workflow-qa-20261004/`.
+The isolated native run used three generated JPEG originals.
 It selected input, output, and Sequence parent folders through native file dialogs, scanned the originals, and exported two of three finished photos through the actual Editing sheet.
 The output contained exactly the selected two photos in their original relative directory, while every working original and sidecar remained.
 The Sequence action produced three real symbolic links under `sequences/Travel/Mountains/Final selection/`, all resolving to the intended originals.
@@ -162,12 +162,12 @@ The live ready batch was moved to `~/Pictures/Latent/2026-10-04-98abb2ed/` while
 The batch ID, transfer state, and library identity were preserved.
 After activating the signed app and matching service, the Editing panel displayed the new folder and PhotoLab selected it with both images in its filmstrip.
 The previous individual-RAW open request had left PhotoLab at `0/0 images`; sending the folder fixed this observed handoff.
-Migration receipts and current test logs are under `var/pictures-editing-20261004/`.
+The pre-migration editing manifest is kept under `var/backups/pictures-editing-20261004/`.
 
 Automated checks exercise workspace migration and annotation persistence, HTTP annotation and Starred behavior, cross-origin rejection, complete and interrupted downloads, duplicate basenames, XMP writes, pending cloud verification, retained JPEGs, cleanup recovery, changed files after review, and restoring prior sidecars.
 Swift checks cover the native client's existing navigation, geometry, image-loading, and request contracts.
 
-The isolated native UI check used `var/editing-verification/workspace` and port 8877.
+The isolated native UI check used a separate workspace and port 8877.
 It exercised multiple selection, keyboard star ratings, caption save, Starred, persistence after restart, a real 77,541,376-byte CloudDrive RAW download, and a completion review containing PhotoLab's real `.dop`, `.xmp`, and 2048 x 1365 JPEG export.
 The downloaded RAW matched the archive SHA-1, and the exported JPEG retained four stars.
 PhotoLab required its existing four-star filter to be cleared for the first import and then an explicit metadata read for this already-opened test photo.
