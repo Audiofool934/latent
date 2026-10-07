@@ -64,15 +64,14 @@ private final class StartupNavigationProtocol: URLProtocol, @unchecked Sendable 
 
 @MainActor @Suite(.serialized)
 struct StartupNavigationTests {
-    private func makeModel() -> (LibraryModel, String) {
+    private func makeModel() -> LibraryModel {
         StartupNavigationProtocol.requested.withLock { $0 = [] }
         StartupNavigationProtocol.summaryStatus.withLock { $0 = 200 }
         StartupNavigationProtocol.sequenceList.withLock { $0 = "{\"sequences\":[]}" }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StartupNavigationProtocol.self]
         let client = try! LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentStartupNavigationTests.\(UUID().uuidString)"
-        return (LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!), suite)
+        return LibraryModel(client: client, preferences: MemoryPreferences())
     }
 
     private func waitUntil(_ predicate: () -> Bool) async throws {
@@ -85,11 +84,10 @@ struct StartupNavigationTests {
 
     @Test(arguments: [GallerySource.starred, .library(date: nil), .search(query: "quiet winter", order: .closest)])
     func startupPreservesNavigationChosenWhileSummaryLoads(_ destination: GallerySource) async throws {
-        let (model, suite) = makeModel()
+        let model = makeModel()
         defer {
             model.shutdownService()
             StartupNavigationProtocol.releaseSummary()
-            model.preferences.removePersistentDomain(forName: suite)
         }
         async let startup: Void = model.start()
         try await waitUntil { StartupNavigationProtocol.pendingSummary.withLock { !$0.isEmpty } }
@@ -105,11 +103,10 @@ struct StartupNavigationTests {
     }
 
     @Test func startupDoesNotDismissTheSequenceOverviewChosenDuringLoading() async throws {
-        let (model, suite) = makeModel()
+        let model = makeModel()
         defer {
             model.shutdownService()
             StartupNavigationProtocol.releaseSummary()
-            model.preferences.removePersistentDomain(forName: suite)
         }
         async let startup: Void = model.start()
         try await waitUntil { StartupNavigationProtocol.pendingSummary.withLock { !$0.isEmpty } }
@@ -122,11 +119,10 @@ struct StartupNavigationTests {
     }
 
     @Test func metadataFailureAfterNavigationRemainsVisibleAndRetryKeepsThatSource() async throws {
-        let (model, suite) = makeModel()
+        let model = makeModel()
         defer {
             model.shutdownService()
             StartupNavigationProtocol.releaseSummary()
-            model.preferences.removePersistentDomain(forName: suite)
         }
         StartupNavigationProtocol.summaryStatus.withLock { $0 = 500 }
         async let startup: Void = model.start()
@@ -149,11 +145,10 @@ struct StartupNavigationTests {
     }
 
     @Test func startupCannotReplaceANewerSequenceList() async throws {
-        let (model, suite) = makeModel()
+        let model = makeModel()
         defer {
             model.shutdownService()
             StartupNavigationProtocol.releaseSummary()
-            model.preferences.removePersistentDomain(forName: suite)
         }
         async let startup: Void = model.start()
         try await waitUntil {

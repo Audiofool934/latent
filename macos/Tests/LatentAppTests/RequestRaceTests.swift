@@ -54,10 +54,7 @@ struct RequestRaceTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DelayedLibraryProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let model = LibraryModel(client: client, preferences: defaults)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         try await model.service.connect()
         defer { model.shutdownService() }
         model.navigate(to: .library(date: "2025-01-01"))
@@ -77,10 +74,7 @@ struct RequestRaceTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DelayedLibraryProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let model = LibraryModel(client: client, preferences: defaults)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         try await model.service.connect()
         defer { model.shutdownService() }
         model.navigate(to: .library(date: "2025-01-01"))

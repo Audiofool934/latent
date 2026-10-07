@@ -43,18 +43,17 @@ private final class StartupProtocol: URLProtocol, @unchecked Sendable {
 
 @MainActor @Suite(.serialized)
 struct ServiceStartupTests {
-    private func model(kind: String) throws -> (LibraryModel, String) {
+    private func makeModel(kind: String) throws -> LibraryModel {
         StartupProtocol.scenario.withLock { $0 = StartupScenario(kind: kind) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StartupProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentServiceTests.\(UUID().uuidString)"
-        return (LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!), suite)
+        return LibraryModel(client: client, preferences: MemoryPreferences())
     }
 
     @Test func concurrentStartupLoadsTheLibraryOnce() async throws {
-        let (model, suite) = try model(kind: "ready")
-        defer { model.shutdownService(); model.preferences.removePersistentDomain(forName: suite) }
+        let model = try makeModel(kind: "ready")
+        defer { model.shutdownService() }
         async let first: Void = model.start()
         async let second: Void = model.start()
         _ = await (first, second)
@@ -69,20 +68,19 @@ struct ServiceStartupTests {
 
     @Test func wrongServiceLegacyAndVersionMismatchStopBeforeAnyLibraryRequest() async throws {
         for kind in ["wrong-app", "legacy", "wrong-version"] {
-            let (model, suite) = try model(kind: kind)
+            let model = try makeModel(kind: kind)
             await model.start()
             #expect(model.summary == nil)
             #expect(!model.service.isConnected && !model.service.isConnecting)
             #expect(StartupProtocol.scenario.withLock { $0.requests } == ["GET /health"])
             #expect(!model.isLoading)
             model.shutdownService()
-            model.preferences.removePersistentDomain(forName: suite)
         }
     }
 
     @Test func disconnectedKeyboardAndRetainedSheetActionsIssueNoRequests() async throws {
-        let (model, suite) = try model(kind: "wrong-version")
-        defer { model.shutdownService(); model.preferences.removePersistentDomain(forName: suite) }
+        let model = try makeModel(kind: "wrong-version")
+        defer { model.shutdownService() }
         await model.start()
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -112,8 +110,8 @@ struct ServiceStartupTests {
     }
 
     @Test func retryAfterServiceCorrectionLoadsTheLibrary() async throws {
-        let (model, suite) = try model(kind: "wrong-version")
-        defer { model.shutdownService(); model.preferences.removePersistentDomain(forName: suite) }
+        let model = try makeModel(kind: "wrong-version")
+        defer { model.shutdownService() }
         await model.start()
         #expect(!model.service.isConnected)
         StartupProtocol.scenario.withLock { $0.kind = "ready" }
