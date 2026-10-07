@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "latent-photo"
-version = "0.2.0"
+version = "0.2.1"
 description = "A macOS workspace for browsing, searching, and curating a large personal photo archive"
 readme = "README.md"
 license = "Apache-2.0"
