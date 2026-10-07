@@ -112,20 +112,19 @@ private final class PreviewProtocol: URLProtocol, @unchecked Sendable {
 
 @MainActor @Suite(.serialized)
 struct PreviewNavigationTests {
-    private func makeModel(starred: Bool = false) async throws -> (LibraryModel, String) {
+    private func makeModel(starred: Bool = false) async throws -> LibraryModel {
         PreviewProtocol.fixture.withLock { $0 = PreviewFixture() }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PreviewProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentPreviewTests.\(UUID().uuidString)"
-        let model = LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         try await model.service.connect()
         model.navigate(to: starred ? .starred : .library(date: "2026-08-29"))
         try await waitUntil { !model.isLoading }
         try #require(model.photos.count == 250 && model.nextOffset == 250)
         model.selectedID = 250
         model.previewSelection()
-        return (model, suite)
+        return model
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {
@@ -136,17 +135,16 @@ struct PreviewNavigationTests {
         }
     }
 
-    private func cleanup(_ model: LibraryModel, _ suite: String) {
+    private func cleanup(_ model: LibraryModel) {
         model.previewPhoto = nil
         model.shutdownService()
         PreviewProtocol.release()
-        model.preferences.removePersistentDomain(forName: suite)
     }
 
     @Test(arguments: [false, true])
     func nextRemainsAvailableWhenTheCurrentPageHasMorePhotos(starred: Bool) async throws {
-        let (model, suite) = try await makeModel(starred: starred)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(starred: starred)
+        defer { cleanup(model) }
         let preview = PhotoPreview(model: model)
         #expect(preview.canMove(by: 1))
         #expect(preview.canMove(by: -1))
@@ -154,8 +152,8 @@ struct PreviewNavigationTests {
 
     @Test(arguments: [false, true])
     func nextLoadsOnePageAndAdvancesToItsFirstPhoto(starred: Bool) async throws {
-        let (model, suite) = try await makeModel(starred: starred)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(starred: starred)
+        defer { cleanup(model) }
         PhotoPreview(model: model).move(by: 1)
         try await waitUntil { model.previewPhoto?.id == 251 }
         #expect(model.selectedID == 251 && model.photos.count == 251)
@@ -164,8 +162,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func repeatedNextJoinsAnExistingGalleryPageAndAdvancesOnce() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true }
         model.loadMore()
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -182,8 +180,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func aFailedPageKeepsThePhotoAndCursorUntilExplicitRetry() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.pageFailures = 1 }
         model.movePreview(by: 1)
         try await waitUntil { !model.isPreviewPaging }
@@ -199,8 +197,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func dismissalAndReopeningTheSamePhotoDoesNotRestoreAnOldAdvance() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true }
         model.movePreview(by: 1)
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -218,8 +216,8 @@ struct PreviewNavigationTests {
 
     @Test(arguments: [false, true])
     func transportRetryClearsOnlyItsOwnDisplayedError(preserveUnrelatedError: Bool) async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.transportFailures = 1 }
         model.movePreview(by: 1)
         try await waitUntil { !model.isPreviewPaging }
@@ -236,8 +234,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func changingTheGalleryCannotAdvanceOrReplaceANewPreview() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true }
         model.movePreview(by: 1)
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -250,8 +248,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func refreshingTheSameStarredSourceInvalidatesThePendingAdvance() async throws {
-        let (model, suite) = try await makeModel(starred: true)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(starred: true)
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true }
         model.movePreview(by: 1)
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -265,8 +263,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func aStarredMutationCannotTreatItsCancelledPageAsAnAdvance() async throws {
-        let (model, suite) = try await makeModel(starred: true)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(starred: true)
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true; $0.holdAnnotations = true }
         model.movePreview(by: 1)
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -280,8 +278,8 @@ struct PreviewNavigationTests {
     @Test(arguments: [GallerySource.search(query: "fixture", order: .closest),
                       .similar(id: 1, name: "Fixture"), .sequence(id: "finite")])
     func finiteResultsNeverFallBackToUnrelatedLibraryPaging(source: GallerySource) async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.navigate(to: source)
         try await waitUntil { !model.isLoading }
         try #require(model.photos.count == 2 && model.total == 500)
@@ -295,8 +293,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func anEmptyTerminalPageStopsAtTheCurrentPhotoWithoutALoop() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.emptyPage = true }
         model.movePreview(by: 1)
         try await waitUntil { !model.isPreviewPaging }
@@ -307,8 +305,8 @@ struct PreviewNavigationTests {
     }
 
     @Test func advancingResolvesTheAnchorAgainAfterPositionsChange() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         PreviewProtocol.fixture.withLock { $0.holdPage = true }
         model.movePreview(by: 1)
         try await waitUntil { PreviewProtocol.fixture.withLock { !$0.held.isEmpty } }

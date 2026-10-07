@@ -200,8 +200,8 @@ private final class SheetProtocol: URLProtocol, @unchecked Sendable {
 @MainActor @Suite(.serialized)
 struct SheetRecoveryTests {
     @Test func dropsUseCurrentHierarchyAndLibraryThenPersistBothKindsOfMove() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         SheetProtocol.fixture.withLock {
             $0.foldersJSON = [
                 "{\"id\":\"parent\",\"name\":\"Projects\",\"parent_id\":null}",
@@ -236,8 +236,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func deletingAnOpenSequenceReturnsToItsFolderAndClearsItsDraft() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         SheetProtocol.fixture.withLock { $0.foldersJSON = ["{\"id\":\"folder\",\"name\":\"Projects\",\"parent_id\":null}"] }
         let sequence = try await model.client.createSequence(name: "Temporary study", note: "", folderID: "folder")
         await model.refreshSequences()
@@ -253,8 +253,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func deletionFailureKeepsSequenceAndOldLibraryConfirmationCannotDelete() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let sequence = try await model.client.createSequence(name: "Keep until confirmed", note: "")
         await model.refreshSequences()
         SheetProtocol.fixture.withLock { $0.requests = []; $0.deleteFailures = 1 }
@@ -267,8 +267,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func pendingDeletionDoesNotReplaceNewerGalleryNavigation() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let sequence = try await model.client.createSequence(name: "Temporary study", note: "")
         await model.refreshSequences()
         model.navigate(to: .sequence(id: sequence.id))
@@ -285,16 +285,15 @@ struct SheetRecoveryTests {
         #expect(model.sequences.isEmpty)
     }
 
-    private func makeModel(ready: Bool = true) async throws -> (LibraryModel, String) {
+    private func makeModel(ready: Bool = true) async throws -> LibraryModel {
         SheetProtocol.fixture.withLock { $0 = SheetFixture(ready: ready) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SheetProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentSheetTests.\(UUID().uuidString)"
-        let model = LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         await model.start()
         try await waitUntil { !model.isLoading }
-        return (model, suite)
+        return model
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {
@@ -305,10 +304,9 @@ struct SheetRecoveryTests {
         }
     }
 
-    private func cleanup(_ model: LibraryModel, _ suite: String) {
+    private func cleanup(_ model: LibraryModel) {
         model.shutdownService()
         SheetProtocol.release()
-        model.preferences.removePersistentDomain(forName: suite)
     }
 
     private func photo() throws -> Photo {
@@ -322,8 +320,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func sequenceDraftKeepsItsFolderWhenNavigationChangesAndChunksLargeSelections() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let selected = try (1...205).map { id in
             try decoder.decode(Photo.self, from: Data(sheetPhotoJSON.replacingOccurrences(of: "\"id\":1", with: "\"id\":\(id)")
@@ -339,8 +337,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func folderExpansionPersistsPerLibraryAndOldFolderDraftsCannotWriteAfterReconnect() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         SheetProtocol.fixture.withLock { $0.foldersJSON = ["{\"id\":\"folder\",\"name\":\"Projects\",\"parent_id\":null}"] }
         await model.refreshSequences()
         model.toggleSequenceFolder("folder")
@@ -369,8 +367,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func offlineSequenceSaveExplainsWhyTheDraftCannotBeSaved() async throws {
-        let (model, suite) = try await makeModel(ready: false)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(ready: false)
+        defer { cleanup(model) }
         #expect(await !model.saveSequence(name: "Keep my draft", note: "Remember this", editing: nil, adding: nil))
         #expect(model.errorMessage?.localizedCaseInsensitiveContains("reconnect") == true)
         #expect(SheetProtocol.fixture.withLock { $0.requests.filter { $0.hasPrefix("POST") }.isEmpty })
@@ -378,8 +376,8 @@ struct SheetRecoveryTests {
 
     @Test(arguments: [false, true])
     func disconnectedSidebarCanReopenEditingWithoutSendingRequests(hasRetainedReview: Bool) async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         if hasRetainedReview {
             await model.refreshEditing()
             model.setEditingPolicy("keep_exports", for: try #require(model.batches.first))
@@ -402,8 +400,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func newSequenceKeepsEntireOrderedSelectionAcrossSelectionChangesAndRetry() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         model.photos = try [3, 1, 2].map { id in
             try decoder.decode(Photo.self, from: Data(sheetPhotoJSON.replacingOccurrences(of: "\"id\":1", with: "\"id\":\(id)")
@@ -424,8 +422,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func photoAddFailureDoesNotCreateAnotherSequenceOnRetry() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         SheetProtocol.fixture.withLock { $0.addFailures = 1 }
         let photo = try photo()
         #expect(await !model.saveSequence(name: "Draft", note: "Keep", editing: nil, adding: photo))
@@ -435,8 +433,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func aLostCreationResponseDoesNotCreateAnotherSequenceOnRetry() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         SheetProtocol.fixture.withLock { $0.createFailuresAfterCommit = 1 }
         #expect(await !model.saveSequence(name: "Draft", note: "Keep", editing: nil, adding: nil))
         #expect(await model.saveSequence(name: "Draft", note: "Keep", editing: nil, adding: nil))
@@ -444,16 +442,16 @@ struct SheetRecoveryTests {
     }
 
     @Test func offlineEditingActionExplainsWhyNothingWasSent() async throws {
-        let (model, suite) = try await makeModel(ready: false)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(ready: false)
+        defer { cleanup(model) }
         model.editAction(try batch(), action: "prepare")
         #expect(model.errorMessage?.localizedCaseInsensitiveContains("reconnect") == true)
         #expect(SheetProtocol.fixture.withLock { $0.requests.filter { $0.hasPrefix("POST") }.isEmpty })
     }
 
     @Test func anAcceptedFinishIsNotRepeatedAfterItsResponseWasLost() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let draftBatch = try batch()
         model.batches = [draftBatch]
         SheetProtocol.fixture.withLock { $0.finishFailuresAfterCommit = 1 }
@@ -466,8 +464,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func anOfflineDraftSurvivesDismissReopenAndRepeatedConnectionRetry() async throws {
-        let (model, suite) = try await makeModel(ready: false)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(ready: false)
+        defer { cleanup(model) }
         model.openSequenceEditor()
         let draft = try #require(model.sequenceEditor)
         draft.name = "Keep this name"
@@ -491,8 +489,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func aLateSaveCannotCloseAnotherDraftOrDuplicateTheFirst() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.openSequenceEditor()
         let first = try #require(model.sequenceEditor)
         first.name = "First draft"
@@ -517,8 +515,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func unchangedCreateReplayDoesNotOverwriteAnExternalRename() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let draft = model.sequenceDraft()
         draft.name = "Original"
         draft.note = "First note"
@@ -533,8 +531,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func revertingAnUncertainMetadataWriteStillSendsTheLatestIntent() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let sequence = try await model.client.createSequence(name: "Original", note: "Keep")
         let draft = model.sequenceDraft(editing: sequence)
         draft.name = "Attempted name"
@@ -547,8 +545,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func correctingARejectedCreationRetriesCurrentFieldsWithTheSameID() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let draft = model.sequenceDraft()
         draft.name = "Rejected name"
         draft.note = "First note"
@@ -565,8 +563,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func sourceDraftsOpenedDuringAnotherLibraryHandshakeKeepTheirLoadedIdentity() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let sequence = try await model.client.createSequence(name: "Library A sequence", note: "Keep")
         model.navigate(to: .sequence(id: sequence.id))
         try await waitUntil { !model.isLoading }
@@ -600,8 +598,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func discardingAPartialDraftDoesNotDeleteItsCreatedSequence() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let draft = model.sequenceDraft(adding: try photo())
         draft.name = "Partly saved"
         SheetProtocol.fixture.withLock { $0.addFailures = 1 }
@@ -613,8 +611,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func retainedDraftsCannotWriteToADifferentLibraryAfterReconnect() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let draft = model.sequenceDraft()
         draft.name = "Original library only"
         SheetProtocol.fixture.withLock { $0.ready = false }
@@ -629,8 +627,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func editingRetentionChoiceSurvivesReopenButBelongsToOneReview() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         await model.refreshEditing()
         let original = try #require(model.batches.first)
         model.setEditingPolicy("clear_batch", for: original)
@@ -644,8 +642,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func anUncertainPrepareIsCheckedBeforeAnIntentionalRefreshCanRun() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         await model.refreshEditing()
         let original = try #require(model.batches.first)
         model.setEditingPolicy("keep_exports", for: original)
@@ -664,8 +662,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func anOlderEditingPollCannotReplaceANewerPreparedReview() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         await model.refreshEditing()
         let original = try #require(model.batches.first)
         SheetProtocol.fixture.withLock { $0.holdPath = "/api/editing" }
@@ -681,8 +679,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func changedReviewedFilesCannotReuseAnOldUploadChoice() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         await model.refreshEditing()
         let original = try #require(model.batches.first)
         model.setEditingPolicy("clear_batch", for: original)
@@ -695,8 +693,8 @@ struct SheetRecoveryTests {
     }
 
     @Test func repeatedEditingActionsCoalesceWhileTheirFirstRequestIsPending() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         await model.refreshEditing()
         let original = try #require(model.batches.first)
         SheetProtocol.fixture.withLock { $0.holdPath = "/api/editing/batch-fixture/finish" }

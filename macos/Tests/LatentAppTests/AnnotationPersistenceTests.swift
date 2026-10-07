@@ -154,21 +154,19 @@ private final class AnnotationProtocol: URLProtocol, @unchecked Sendable {
 
 @MainActor @Suite(.serialized)
 struct AnnotationPersistenceTests {
-    private func makeModel(store: any AnnotationDraftStore = MemoryAnnotationDraftStore(), resetFixture: Bool = true) async throws -> (LibraryModel, String) {
+    private func makeModel(store: any AnnotationDraftStore = MemoryAnnotationDraftStore(), resetFixture: Bool = true) async throws -> LibraryModel {
         if resetFixture { AnnotationProtocol.fixture.withLock { $0 = AnnotationFixture() } }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [AnnotationProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentAnnotationTests.\(UUID().uuidString)"
-        let model = LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!, annotationStore: store)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences(), annotationStore: store)
         do {
             try await model.service.connect()
             model.photos = (1...3).map(annotationPhoto)
             model.selectedID = 1
-            return (model, suite)
+            return model
         } catch {
             model.shutdownService()
-            model.preferences.removePersistentDomain(forName: suite)
             throw error
         }
     }
@@ -181,15 +179,14 @@ struct AnnotationPersistenceTests {
         }
     }
 
-    private func cleanup(_ model: LibraryModel, _ suite: String) {
+    private func cleanup(_ model: LibraryModel) {
         model.shutdownService()
         AnnotationProtocol.release()
-        model.preferences.removePersistentDomain(forName: suite)
     }
 
     @Test func ratingsForDifferentPhotosSurviveAnEarlierPendingSave() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(2)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.setSelection([2], primary: 2)
@@ -201,8 +198,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func theLatestRatingForTheSamePhotoWinsWithoutLosingAnotherPhoto() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(1)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.setSelection([2], primary: 2)
@@ -217,8 +214,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func pickThenRejectClearsFirstAndKeepsTheLatestFlagAndStars() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.flagSelection(.pick)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         #expect(model.selectedPhoto?.flag == .pick)
@@ -235,8 +232,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func previewUsesTheSameGradingAndNavigationKeysAndSpaceClosesIt() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         func key(_ text: String, code: UInt16 = 0) throws -> NSEvent {
             try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                 windowNumber: 0, context: nil, characters: text, charactersIgnoringModifiers: text,
@@ -262,8 +259,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func queuedCaptionsAndRatingsPreserveEachOther() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(4)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.annotate(ids: [1], caption: "Quiet light")
@@ -276,8 +273,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func navigationDoesNotRetargetOrDropQueuedRatings() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(2)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.setSelection([2], primary: 2)
@@ -292,8 +289,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func failuresPauseWithoutLosingNewerRatingsCaptionsOrClearingValues() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         AnnotationProtocol.fixture.withLock { $0.responseCodes = [500] }
         model.rateSelection(4)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
@@ -319,8 +316,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func anOlderAcknowledgmentCannotRepaintTheLatestIntent() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(1)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.rateSelection(5)
@@ -340,8 +337,8 @@ struct AnnotationPersistenceTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LatentAnnotation-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = FileAnnotationDraftStore(url: directory.appendingPathComponent("drafts.json"))
-        let (first, suite) = try await makeModel(store: store)
-        defer { cleanup(first, suite) }
+        let first = try await makeModel(store: store)
+        defer { cleanup(first) }
         first.rateSelection(1)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         first.rateSelection(5)
@@ -349,8 +346,8 @@ struct AnnotationPersistenceTests {
         first.shutdownService()
         try await waitUntil { !first.isSaving }
         AnnotationProtocol.release()
-        let (restored, restoredSuite) = try await makeModel(store: store, resetFixture: false)
-        defer { cleanup(restored, restoredSuite) }
+        let restored = try await makeModel(store: store, resetFixture: false)
+        defer { cleanup(restored) }
         #expect(restored.annotationQueue.pendingCount == 2 && !restored.isSaving)
         #expect(AnnotationProtocol.fixture.withLock { $0.patches.count } == 1)
         restored.annotate(ids: [2], rating: 3)
@@ -367,18 +364,17 @@ struct AnnotationPersistenceTests {
 
     @Test func restoredDraftCheckingDoesNotClaimTheHealthyLibraryIsDisconnected() async throws {
         let store = MemoryAnnotationDraftStore()
-        let (first, suite) = try await makeModel(store: store)
-        defer { cleanup(first, suite) }
+        let first = try await makeModel(store: store)
+        defer { cleanup(first) }
         first.rateSelection(3)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         first.shutdownService()
         try await waitUntil { !first.isSaving }
         AnnotationProtocol.release()
 
-        let restoredSuite = "LatentAnnotationTests.\(UUID().uuidString)"
-        let restored = LibraryModel(client: first.client, preferences: UserDefaults(suiteName: restoredSuite)!,
+        let restored = LibraryModel(client: first.client, preferences: MemoryPreferences(),
                                     annotationStore: store)
-        defer { cleanup(restored, restoredSuite) }
+        defer { cleanup(restored) }
         let writesBefore = AnnotationProtocol.fixture.withLock { $0.patches.count }
         AnnotationProtocol.fixture.withLock { $0.holdHealth = true }
         let connecting = Task { try await restored.service.connect() }
@@ -406,8 +402,8 @@ struct AnnotationPersistenceTests {
 
     @Test func aDifferentLibraryReceivesNoRestoredOrNewMutations() async throws {
         let store = MemoryAnnotationDraftStore()
-        let (first, suite) = try await makeModel(store: store)
-        defer { cleanup(first, suite) }
+        let first = try await makeModel(store: store)
+        defer { cleanup(first) }
         first.rateSelection(4)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         first.shutdownService()
@@ -415,8 +411,8 @@ struct AnnotationPersistenceTests {
         AnnotationProtocol.release()
         let saved = store.data
         AnnotationProtocol.fixture.withLock { $0.dataID = "other-library" }
-        let (other, otherSuite) = try await makeModel(store: store, resetFixture: false)
-        defer { cleanup(other, otherSuite) }
+        let other = try await makeModel(store: store, resetFixture: false)
+        defer { cleanup(other) }
         other.retryAnnotations()
         other.rateSelection(5)
         #expect(AnnotationProtocol.fixture.withLock { $0.patches.count } == 1)
@@ -427,8 +423,8 @@ struct AnnotationPersistenceTests {
 
     @Test func diskFailureKeepsIntentInMemoryAndBlocksDispatchUntilExplicitRetry() async throws {
         let store = FailingAnnotationStore()
-        let (model, suite) = try await makeModel(store: store)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(store: store)
+        defer { cleanup(model) }
         store.failNextSave = true
         model.rateSelection(5)
         #expect(model.annotationQueue.hasUndurableEdits && model.annotationQueue.pendingCount == 1)
@@ -444,8 +440,8 @@ struct AnnotationPersistenceTests {
 
     @Test func failedAcknowledgmentPersistenceKeepsTheCurrentDesiredFieldsForRetry() async throws {
         let store = FailingAnnotationStore()
-        let (model, suite) = try await makeModel(store: store)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(store: store)
+        defer { cleanup(model) }
         model.rateSelection(2)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.rateSelection(5)
@@ -467,8 +463,8 @@ struct AnnotationPersistenceTests {
         let store = MemoryAnnotationDraftStore()
         store.data = Data("unfinished draft".utf8)
         let saved = store.data
-        let (model, suite) = try await makeModel(store: store)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(store: store)
+        defer { cleanup(model) }
         model.rateSelection(5)
         model.retryAnnotations()
         #expect(store.data == saved)
@@ -483,8 +479,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func ratingsAreAcceptedWhileASequenceSaveIsPending() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         AnnotationProtocol.fixture.withLock { $0.holdSequence = true }
         let save = Task { await model.saveSequence(name: "Fixture", note: "", editing: nil, adding: nil) }
         defer { save.cancel() }
@@ -498,8 +494,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func starredRefreshKeepsSelectionAvailableAndCoalescesQueuedEdits() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         AnnotationProtocol.fixture.withLock { fixture in
             for id in 1...3 { fixture.photos[id]?.rating = 5 }
             fixture.holdStarredCount = 1
@@ -525,8 +521,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func aLargeSelectionIsSentInBoundedBatchesWithoutLosingPhotos() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.photos = (1...501).map(annotationPhoto)
         AnnotationProtocol.fixture.withLock { fixture in
             fixture.photos = Dictionary(uniqueKeysWithValues: model.photos.map { ($0.id, $0) })
@@ -542,8 +538,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func aLateNavigationSnapshotCannotReplaceAnAcknowledgedRating() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(2)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         model.rateSelection(5)
@@ -564,8 +560,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func aLateSequenceMutationCannotReplaceAnAcknowledgedRating() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         let items = model.photos.prefix(2).map { photo in
@@ -592,8 +588,8 @@ struct AnnotationPersistenceTests {
 
     @Test func anUndurableEditRemainsMarkedAfterDisconnectionAndRetry() async throws {
         let store = FailingAnnotationStore()
-        let (model, suite) = try await makeModel(store: store)
-        defer { cleanup(model, suite) }
+        let model = try await makeModel(store: store)
+        defer { cleanup(model) }
         store.failNextSave = true
         model.rateSelection(5)
         model.shutdownService()
@@ -603,8 +599,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func aRatingAcknowledgmentDoesNotOverwriteAnUnrelatedExternalCaption() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         model.rateSelection(5)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
         AnnotationProtocol.fixture.withLock {
@@ -623,8 +619,8 @@ struct AnnotationPersistenceTests {
     }
 
     @Test func malformedAcknowledgmentsDoNotDeletePendingEdits() async throws {
-        let (model, suite) = try await makeModel()
-        defer { cleanup(model, suite) }
+        let model = try await makeModel()
+        defer { cleanup(model) }
         AnnotationProtocol.fixture.withLock { $0.malformedAcknowledgment = true }
         model.rateSelection(5)
         try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
