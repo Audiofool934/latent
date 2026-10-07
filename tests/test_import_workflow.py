@@ -9,6 +9,7 @@ from PIL import Image
 
 from latent.archive_copies import ArchiveCopies
 from latent.editing import EditingManager
+from latent.embedding_backends import EmbeddingEngine, EmbeddingProfile
 from latent.embedding_runs import EmbeddingRuns
 from latent.embeddings import EmbeddingStore
 from latent.errors import ConfigurationError
@@ -17,6 +18,17 @@ from latent.imports import ImportManager
 from latent.ingest import FolderIndexer
 from latent.locations import LocationsStore
 from latent.storage import StateStore
+
+
+def fixture_runs(state_dir, embedding_dir, workspace_dir, encoder=None, *, model_id="fixture"):
+    profile = EmbeddingProfile(
+        key="fixture", display_name="Fixture", model_id=model_id, dimensions=4,
+        store_name=embedding_dir.name, provider="fixture",
+    )
+    engine = EmbeddingEngine(profile, embedding_dir, lambda: encoder)
+    return EmbeddingRuns(
+        state_dir, workspace_dir, engines={"fixture": engine}, default_backend=lambda: "fixture"
+    )
 
 
 def photo(path, color="navy"):
@@ -269,13 +281,8 @@ def test_selected_embeddings_never_encode_unselected_pending_jobs_or_prune_exist
     locations, _, _, manager, batch = setup(tmp_path)
     encoder = Encoder()
     embedding_dir = tmp_path / "embeddings"
-    runs = EmbeddingRuns(
-        locations.state_dir,
-        embedding_dir,
-        locations.path.parent,
-        encoder_factory=lambda: encoder,
-        model_id="fixture",
-        dimensions=4,
+    runs = fixture_runs(
+        locations.state_dir, embedding_dir, locations.path.parent, encoder
     )
     try:
         action(manager, batch, "start")
@@ -307,13 +314,8 @@ def test_selected_embeddings_never_encode_unselected_pending_jobs_or_prune_exist
 def test_embedding_review_rejects_removed_photo_without_any_api_call(tmp_path):
     locations, _, _, manager, batch = setup(tmp_path)
     encoder = Encoder()
-    runs = EmbeddingRuns(
-        locations.state_dir,
-        tmp_path / "embeddings",
-        locations.path.parent,
-        encoder_factory=lambda: encoder,
-        model_id="fixture",
-        dimensions=4,
+    runs = fixture_runs(
+        locations.state_dir, tmp_path / "embeddings", locations.path.parent, encoder
     )
     try:
         action(manager, batch, "start")
@@ -339,12 +341,9 @@ def test_heif_extensions_are_importable():
 
 def test_embedding_review_rejects_an_index_from_another_model(tmp_path):
     locations, _, _, manager, batch = setup(tmp_path)
-    runs = EmbeddingRuns(
-        locations.state_dir,
-        tmp_path / "vectors",
-        locations.path.parent,
+    runs = fixture_runs(
+        locations.state_dir, tmp_path / "vectors", locations.path.parent,
         model_id="current-model",
-        dimensions=4,
     )
     try:
         action(manager, batch, "start")
@@ -377,7 +376,7 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
         workspace_dir=tmp_path / "workspace",
         vector_index=VectorIndex(tmp_path / "vectors", model_id="fixture", dimensions=4),
     )
-    server.embedding_runs.encoder_factory = lambda: encoder
+    server.engines["fixed"].encoder_factory = lambda: encoder
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     base = f"http://127.0.0.1:{server.server_port}"
@@ -461,13 +460,8 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
 def test_embedding_pause_during_failed_batch_does_not_start_fallback_requests(tmp_path):
     locations, _, _, manager, batch = setup(tmp_path)
     encoder = Encoder()
-    runs = EmbeddingRuns(
-        locations.state_dir,
-        tmp_path / "embeddings",
-        locations.path.parent,
-        encoder_factory=lambda: encoder,
-        model_id="fixture",
-        dimensions=4,
+    runs = fixture_runs(
+        locations.state_dir, tmp_path / "embeddings", locations.path.parent, encoder
     )
 
     def interrupted(paths, batch_size):

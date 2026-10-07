@@ -29,6 +29,7 @@ After changing the artwork, run `scripts/build-macos-icon.sh` with librsvg's `rs
 Normal app builds copy the packaged icon without requiring librsvg.
 The application requires macOS 26 or newer and defaults to `http://127.0.0.1:8766`.
 The **Imports** sidebar opens the [daily import workflow](import-workflow.md), including resumable previews, verified archive copies and explicitly confirmed photo embeddings.
+Its **AI Search** tab also chooses the search engine, including [on-device EmbeddingGemma 2](local-embeddings.md) with validation before switching.
 The build requires the project's existing `.venv/bin/python`, created with `uv sync`.
 It packages that runtime path and the standard catalog, embedding and workspace paths in `Contents/Resources/LocalService.json`.
 Opening the app from Finder or the Dock starts its local library service when needed, and quitting the app stops that owned service.

@@ -135,12 +135,29 @@ public final class LibraryClient: Sendable {
 
     public func embeddingRuns() async throws -> EmbeddingRunList { try await get("api/embedding-runs") }
 
-    public func prepareEmbeddings(id: String, scope: String, ids: [Int]?, importID: String?, dataID: String) async throws -> EmbeddingRunResponse {
+    public func prepareEmbeddings(id: String, scope: String, ids: [Int]?, importID: String?, backend: String? = nil,
+                                  dataID: String) async throws -> EmbeddingRunResponse {
         struct Body: Encodable, Sendable {
-            let request_id: String; let scope: String; let asset_ids: [Int]?; let batch_id: String?; let expected_data_id: String
+            let request_id: String; let scope: String; let asset_ids: [Int]?; let batch_id: String?
+            let backend: String?; let expected_data_id: String
         }
         return try await send("api/embedding-runs", method: "POST", body:
-            Body(request_id: id, scope: scope, asset_ids: ids, batch_id: importID, expected_data_id: dataID))
+            Body(request_id: id, scope: scope, asset_ids: ids, batch_id: importID, backend: backend, expected_data_id: dataID))
+    }
+
+    public func searchEngines() async throws -> SearchEngineList { try await get("api/search-backends") }
+
+    public func validateSearchEngine(_ key: String, dataID: String) async throws {
+        struct Body: Encodable, Sendable { let expected_data_id: String }
+        struct Response: Decodable, Sendable {}
+        let _: Response = try await send("api/search-backends/\(key)/validate", method: "POST",
+                                         body: Body(expected_data_id: dataID))
+    }
+
+    public func activateSearchEngine(_ engine: SearchEngine, dataID: String) async throws -> SearchEngineList {
+        struct Body: Encodable, Sendable { let backend: String; let validation_id: String?; let expected_data_id: String }
+        return try await send("api/search-backends/activate", method: "POST",
+                              body: Body(backend: engine.key, validation_id: engine.validation?.id, expected_data_id: dataID))
     }
 
     public func embeddingAction(_ run: PhotoEmbeddingRun, action: String, dataID: String) async throws -> EmbeddingRunResponse {

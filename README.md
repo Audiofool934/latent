@@ -66,6 +66,7 @@ CloudDrive device token 只从应用自己的本地 plist 读取到内存，不�
 底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
 目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
 当前 API 契约、费用和迁移记录见 [Gemini embeddings](docs/gemini-embeddings.md)。
+也可以改用在本机通过 llama.cpp 运行的 EmbeddingGemma 2，它使用独立索引，经验证后需显式切换，见 [local EmbeddingGemma 2 search](docs/local-embeddings.md)。
 退休本地模型的历史测量保留在 [embedding benchmark](docs/embedding-benchmark.md)。
 用户创作状态的持久化与交换契约见 [writable workspace](docs/writable-workspace.md)。
 `latent serve` 默认只监听 `127.0.0.1:8765`，日期浏览与相似照片只读取本地数据；自然语言搜索会请求 Gemini API 生成查询向量。

@@ -12,9 +12,29 @@ from functools import partial
 from pathlib import Path
 
 from .editing import DEFAULT_EDITING_DIR
+from .embedding_backends import (
+    EMBEDDINGGEMMA,
+    GEMINI,
+    PROFILES,
+    BackendSelection,
+    EmbeddingEngine,
+    current_validation,
+    engine_dirs,
+    profile,
+    validate_index,
+)
+from .embeddinggemma import (
+    ARTIFACT_REVISION,
+    EmbeddingGemmaEncoder,
+    EmbeddingGemmaRuntime,
+    RuntimeConfig,
+    check_files,
+    fetch_artifacts,
+    load_runtime_config,
+    save_runtime_config,
+    verify_artifacts,
+)
 from .embeddings import (
-    DEFAULT_EMBEDDING_DIMENSIONS,
-    DEFAULT_EMBEDDING_MODEL,
     EmbeddingStore,
     EmbeddingWorker,
     load_embedding_assets,
@@ -209,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     embedding_sync.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     embedding_sync.add_argument("--embedding-dir", type=Path)
+    _add_backend_argument(embedding_sync)
     embedding_sync.add_argument("--retry-failed", action="store_true")
     embedding_sync.add_argument("--json", action="store_true")
     embedding_sync.set_defaults(handler=_run_embedding_sync)
@@ -219,20 +240,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     embedding_status.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     embedding_status.add_argument("--embedding-dir", type=Path)
+    _add_backend_argument(embedding_status)
     embedding_status.add_argument("--json", action="store_true")
     embedding_status.set_defaults(handler=_run_embedding_status)
 
     embedding_build = subparsers.add_parser(
         "embedding-build",
-        help="upload queued contact previews to Gemini and store image embeddings locally",
+        help="encode queued contact previews with the chosen engine and store vectors locally",
     )
     embedding_build.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     embedding_build.add_argument("--embedding-dir", type=Path)
+    _add_backend_argument(embedding_build)
     embedding_build.add_argument(
         "--max-jobs",
         type=_positive_int,
         required=True,
-        help="maximum number of photos to upload to Gemini in this run",
+        help="maximum number of photos to encode in this run",
     )
     embedding_build.add_argument("--batch-size", type=_embedding_batch_size, default=32)
     embedding_build.add_argument("--timeout-seconds", type=_positive_int, default=60)
@@ -246,6 +269,47 @@ def build_parser() -> argparse.ArgumentParser:
     embedding_build.add_argument("--retry-failed", action="store_true")
     embedding_build.add_argument("--json", action="store_true")
     embedding_build.set_defaults(handler=_run_embedding_build)
+
+    local = subparsers.add_parser(
+        "local-encoder", help="set up and check the on-device EmbeddingGemma 2 encoder"
+    )
+    local_commands = local.add_subparsers(dest="local_command", required=True)
+    local_setup = local_commands.add_parser(
+        "setup", help="verify llama.cpp and the pinned model files, then save the configuration"
+    )
+    local_setup.add_argument("--llama-server", type=Path, required=True)
+    local_setup.add_argument("--model-dir", type=Path, required=True)
+    local_setup.set_defaults(handler=_run_local_setup)
+    local_status = local_commands.add_parser("status", help="show configuration and index state")
+    local_status.set_defaults(handler=_run_local_status)
+    local_fetch = local_commands.add_parser(
+        "fetch", help="download the pinned model and projector files (about 865 MB)"
+    )
+    local_fetch.add_argument("--model-dir", type=Path, required=True)
+    local_fetch.set_defaults(handler=_run_local_fetch)
+    local_validate = local_commands.add_parser(
+        "validate", help="check the local index end to end before it can be activated"
+    )
+    local_validate.add_argument("--sample", type=_positive_int, default=12)
+    local_validate.set_defaults(handler=_run_local_validate)
+    for command in (local_setup, local_status, local_fetch, local_validate):
+        command.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+        command.add_argument("--embedding-dir", type=Path)
+        command.add_argument("--json", action="store_true")
+
+    backend = subparsers.add_parser(
+        "search-backend", help="show or explicitly switch the engine used for search"
+    )
+    backend_commands = backend.add_subparsers(dest="backend_command", required=True)
+    backend_show = backend_commands.add_parser("show", help="show indexes and the active engine")
+    backend_show.set_defaults(handler=_run_backend_show)
+    backend_activate = backend_commands.add_parser("activate", help="switch the active engine")
+    backend_activate.add_argument("backend", choices=sorted(PROFILES))
+    backend_activate.set_defaults(handler=_run_backend_activate)
+    for command in (backend_show, backend_activate):
+        command.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+        command.add_argument("--embedding-dir", type=Path)
+        command.add_argument("--json", action="store_true")
 
     workspace_status = subparsers.add_parser(
         "workspace-status",
@@ -575,9 +639,9 @@ def _run_serve(args: argparse.Namespace) -> int:
 
 
 def _run_embedding_sync(args: argparse.Namespace) -> int:
-    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    engine = _engine(args)
     assets = load_embedding_assets(args.state_dir)
-    with EmbeddingStore(embedding_dir) as store:
+    with engine.store() as store:
         sync = store.sync_assets(assets, retry_failed=args.retry_failed)
         payload = {"sync": sync.as_dict(), "status": store.status()}
     _print_embedding_payload(payload, as_json=args.json)
@@ -585,21 +649,22 @@ def _run_embedding_sync(args: argparse.Namespace) -> int:
 
 
 def _run_embedding_status(args: argparse.Namespace) -> int:
-    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
-    database_path = embedding_dir / "index.sqlite"
+    engine = _engine(args)
+    database_path = engine.embedding_dir / "index.sqlite"
     if not database_path.is_file():
         payload: dict[str, object] = {
             "exists": False,
+            "backend": engine.profile.key,
             "database_path": str(database_path),
-            "model_id": DEFAULT_EMBEDDING_MODEL,
-            "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
+            "model_id": engine.profile.model_id,
+            "dimensions": engine.profile.dimensions,
             "source": "local_contact_cache",
             "archive_network_bytes": 0,
             "archive_modified": False,
         }
     else:
-        with EmbeddingStore(embedding_dir) as store:
-            payload = {"exists": True, **store.status()}
+        with engine.store() as store:
+            payload = {"exists": True, "backend": engine.profile.key, **store.status()}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     elif not payload["exists"]:
@@ -610,19 +675,59 @@ def _run_embedding_status(args: argparse.Namespace) -> int:
 
 
 def _run_embedding_build(args: argparse.Namespace) -> int:
-    embedding_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    engine = _engine(args)
+    if engine.profile.key != GEMINI and args.workers != 1:
+        raise ConfigurationError("The local encoder runs one request at a time; use --workers 1")
     assets = load_embedding_assets(args.state_dir)
-    with EmbeddingStore(embedding_dir) as store:
+    with engine.store() as store:
         sync = store.sync_assets(assets, retry_failed=args.retry_failed)
         counts = store.job_counts()
         pending = counts["pending"] + counts["running"]
-    run = _run_api_workers(args, embedding_dir) if pending else None
-    with EmbeddingStore(embedding_dir) as store:
+    run = None
+    if pending:
+        run = (
+            _run_api_workers(args, engine.embedding_dir)
+            if engine.profile.key == GEMINI
+            else _run_local_worker(args, engine)
+        )
+    with engine.store() as store:
         payload = {"sync": sync.as_dict(), "run": run, "status": store.status()}
     _print_embedding_payload(payload, as_json=args.json)
     if run is not None and run["provider_errors"]:
         return 2
     return 1 if run is not None and run["failed"] else 0
+
+
+def _run_local_worker(args: argparse.Namespace, engine: EmbeddingEngine) -> dict[str, object]:
+    runtime = EmbeddingGemmaRuntime(engine.embedding_dir.parent)
+    encoder = EmbeddingGemmaEncoder(runtime)
+    last_progress = 0.0
+    provider_errors: list[str] = []
+
+    def report(result) -> None:
+        nonlocal last_progress
+        if args.progress and time.monotonic() - last_progress >= 5:
+            print(json.dumps({"progress": result.as_dict()}), file=sys.stderr, flush=True)
+            last_progress = time.monotonic()
+
+    try:
+        with engine.store() as store:
+            result = EmbeddingWorker(store, encoder, args.state_dir / "cache").run(
+                max_jobs=args.max_jobs,
+                batch_size=1,
+                max_consecutive_failures=args.max_consecutive_failures,
+                progress=report,
+            ).as_dict()
+    except EmbeddingServiceError as error:
+        provider_errors.append(str(error))
+        result = {"processed": 0, "succeeded": 0, "failed": 0, "failures": []}
+    finally:
+        runtime.close()
+    return {
+        **result, **encoder.usage(), "provider": engine.profile.provider, "workers": 1,
+        "photo_upload_bytes": 0, "archive_network_bytes": 0, "archive_modified": False,
+        "provider_errors": provider_errors,
+    }
 
 
 def _run_api_workers(args: argparse.Namespace, embedding_dir: Path) -> dict[str, object]:
@@ -800,7 +905,12 @@ def _print_embedding_payload(payload: dict[str, object], *, as_json: bool) -> No
             f"{run['processed']} processed, {run['succeeded']} succeeded, "
             f"{run['failed']} failed"
         )
-        print(f"Gemini photo uploads: {run['photo_upload_bytes']} bytes, archive modified: no")
+        if run.get("provider") == "gemini_api":
+            print(
+                f"Gemini photo uploads: {run['photo_upload_bytes']} bytes, archive modified: no"
+            )
+        else:
+            print("Encoded on this Mac; nothing uploaded, archive modified: no")
         for error in run.get("provider_errors", []):
             print(f"Embedding paused: {error}")
     status = payload.get("status")
@@ -819,7 +929,8 @@ def _print_embedding_status(payload: dict[str, object]) -> None:
         f"{jobs['succeeded']} succeeded, {jobs['failed']} failed"
     )
     print(f"Vectors: {payload['vectors']}, {_format_bytes(int(payload['vector_bytes']))}")
-    print("Embedding provider: Gemini API; archive reads: 0 B; archive modified: no")
+    provider = "Gemini API" if payload.get("backend", GEMINI) == GEMINI else "this Mac"
+    print(f"Embedding provider: {provider}; archive reads: 0 B; archive modified: no")
 
 
 def _print_spike(payload: dict[str, object]) -> None:
@@ -885,6 +996,182 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.2f} {unit}"
         amount /= 1024
     raise AssertionError("unreachable")
+
+
+def _add_backend_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backend", choices=sorted(PROFILES),
+        help="embedding engine (default: the active search engine)",
+    )
+
+
+def _engine(args: argparse.Namespace, backend: str | None = None) -> EmbeddingEngine:
+    gemini_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    key = backend or getattr(args, "backend", None)
+    key = key or BackendSelection(gemini_dir.parent).read()["backend"]
+    return EmbeddingEngine(profile(key), engine_dirs(gemini_dir)[key], encoder_factory=None)
+
+
+def _run_local_setup(args: argparse.Namespace) -> int:
+    engine = _engine(args, EMBEDDINGGEMMA)
+    config = RuntimeConfig(
+        args.llama_server.expanduser().resolve(), args.model_dir.expanduser().resolve()
+    )
+    check_files(config)
+    files = verify_artifacts(config.model_dir)
+    runtime = EmbeddingGemmaRuntime(engine.embedding_dir.parent, config=config)
+    try:
+        started = time.monotonic()
+        vector = EmbeddingGemmaEncoder(runtime).encode_texts(["latent setup check"])[0]
+        seconds = round(time.monotonic() - started, 2)
+    finally:
+        runtime.close()
+    path = save_runtime_config(engine.embedding_dir.parent, config)
+    payload = {
+        "configured": True, "config_path": str(path), "files": files,
+        "llama_server": str(config.llama_server), "dimensions": len(vector),
+        "startup_seconds": seconds, "artifact_revision": ARTIFACT_REVISION,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Model files verified at revision {ARTIFACT_REVISION[:12]}")
+        print(f"llama-server loaded EmbeddingGemma 2 and returned {len(vector)}D vectors "
+              f"({seconds}s cold start)")
+        print(f"Saved {path}")
+    return 0
+
+
+def _run_local_status(args: argparse.Namespace) -> int:
+    engine = _engine(args, EMBEDDINGGEMMA)
+    root = engine.embedding_dir.parent
+    config = load_runtime_config(root)
+    problem = None
+    if config is None:
+        problem = "not configured; run `latent local-encoder setup`"
+    else:
+        try:
+            check_files(config)
+        except ConfigurationError as error:
+            problem = str(error)
+    payload: dict[str, object] = {
+        "configured": config is not None, "ready": problem is None, "problem": problem,
+        "llama_server": str(config.llama_server) if config else None,
+        "model_dir": str(config.model_dir) if config else None,
+        "index": _index_summary(engine),
+        "active_backend": BackendSelection(root).read()["backend"],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Local encoder: {'ready' if problem is None else problem}")
+        if config:
+            print(f"llama-server: {config.llama_server}")
+            print(f"Model files: {config.model_dir}")
+        _print_index_summary(engine.profile.display_name, payload["index"])
+        print(f"Active search engine: {payload['active_backend']}")
+    return 0
+
+
+def _run_local_fetch(args: argparse.Namespace) -> int:
+    target = args.model_dir.expanduser().resolve()
+    shown: dict[str, int] = {}
+
+    def progress(name: str, received: int, total: int) -> None:
+        percent = received * 100 // total
+        if not args.json and shown.get(name) != percent and percent % 10 == 0:
+            shown[name] = percent
+            print(f"{name}: {percent}%", file=sys.stderr, flush=True)
+
+    files = fetch_artifacts(target, progress=progress)
+    if args.json:
+        print(json.dumps({"model_dir": str(target), "files": files}, indent=2, sort_keys=True))
+    else:
+        print(f"Model files verified in {target}")
+        print("Next: latent local-encoder setup --llama-server PATH --model-dir " + str(target))
+    return 0
+
+
+def _run_local_validate(args: argparse.Namespace) -> int:
+    engine = _engine(args, EMBEDDINGGEMMA)
+    runtime = EmbeddingGemmaRuntime(engine.embedding_dir.parent)
+    try:
+        report = validate_index(
+            engine, args.state_dir, EmbeddingGemmaEncoder(runtime), sample_size=args.sample
+        )
+    finally:
+        runtime.close()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for check in report["checks"]:
+            print(f"{'pass' if check['passed'] else 'FAIL'}  {check['name']}: {check['detail']}")
+        print("Validation passed" if report["passed"] else "Validation failed")
+    return 0 if report["passed"] else 1
+
+
+def _run_backend_show(args: argparse.Namespace) -> int:
+    gemini_dir = _embedding_dir(args.state_dir, args.embedding_dir)
+    active = BackendSelection(gemini_dir.parent).read()
+    engines = [_engine(args, key) for key in PROFILES]
+    payload = {
+        "active": active["backend"], "activated_at": active.get("activated_at"),
+        "backends": {engine.profile.key: _index_summary(engine) for engine in engines},
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for engine in engines:
+            marker = "*" if engine.profile.key == active["backend"] else " "
+            print(f"{marker} {engine.profile.key}")
+            summary = payload["backends"][engine.profile.key]
+            _print_index_summary(engine.profile.display_name, summary)
+    return 0
+
+
+def _run_backend_activate(args: argparse.Namespace) -> int:
+    engine = _engine(args, args.backend)
+    try:
+        selection = BackendSelection(engine.embedding_dir.parent).activate(engine)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from error
+    if args.json:
+        print(json.dumps(selection, indent=2, sort_keys=True))
+    else:
+        print(f"Search now uses {engine.profile.display_name}")
+        print("A running Latent service switches on its next search.")
+    return 0
+
+
+def _index_summary(engine: EmbeddingEngine) -> dict[str, object]:
+    if not engine.has_index():
+        return {"exists": False, "path": str(engine.embedding_dir)}
+    with engine.store() as store:
+        jobs = store.job_counts()
+        vectors = store.vector_revision()[0]
+    summary: dict[str, object] = {
+        "exists": True, "path": str(engine.embedding_dir), "vectors": vectors, "jobs": jobs,
+    }
+    if engine.profile.requires_validation:
+        report = current_validation(engine)
+        summary["validation"] = (
+            "not run" if report is None else "stale" if report.get("stale")
+            else "passed" if report["passed"] else "failed"
+        )
+    return summary
+
+
+def _print_index_summary(name: str, summary: object) -> None:
+    assert isinstance(summary, dict)
+    if not summary["exists"]:
+        print(f"  {name}: no index at {summary['path']}")
+        return
+    jobs = summary["jobs"]
+    line = (f"  {name}: {summary['vectors']} vectors, {jobs['pending']} pending, "
+            f"{jobs['failed']} failed")
+    if "validation" in summary:
+        line += f", validation {summary['validation']}"
+    print(line)
 
 
 def _embedding_batch_size(value: str) -> int:

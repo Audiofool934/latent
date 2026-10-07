@@ -79,7 +79,7 @@ private struct SearchHistoryRow: View {
                         if !entry.filters.isEmpty {
                             Text(entry.filters.summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                         }
-                        if !entry.reusable { Text("Model changed; submit a new search").font(.caption2).foregroundStyle(.orange) }
+                        if !entry.reusable { Text("Saved with another search engine").font(.caption2).foregroundStyle(.orange) }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .contentShape(Rectangle())

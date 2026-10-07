@@ -88,13 +88,13 @@ No archive copy has been made for either batch.
 
 ## Verification baseline
 
-Checked on 2026-10-06 against commit `a661a2a`:
+Checked on 2026-10-07 with the local search engine added:
 
 | Check | Result |
 | --- | --- |
-| `uv run --frozen pytest` | 211 passed, including the Node navigation regressions |
+| `uv run --frozen pytest` | 223 passed, including the Node navigation regressions |
 | `uv run --frozen ruff check .` | Clean |
-| `scripts/test-macos.sh` (Xcode, Swift 6.4) | 134 passed, 1 opt-in test skipped |
+| `scripts/test-macos.sh` (Xcode, Swift 6.4) | 138 passed, 1 opt-in test skipped |
 | `LATENT_TEST_PYTHON=$PWD/.venv/bin/python scripts/test-macos.sh --filter nativeOwnerStarts` | Passed |
 
 The opt-in test starts, reuses, and stops a real Python service against temporary data.
@@ -121,6 +121,16 @@ Dates follow the earlier notes, which used Asia/Singapore time.
 | 2026-10-04 | Grading keys, inline preview, reference-image search, nested Sequence folders (schemas 3 and 4), editing in `~/Pictures/Latent`, Locations, filters, Trash ([editing](archived-photo-editing.md)) |
 | 2026-10-05 | JPEG backfill, timelapse organizer, review controls and info panel, search history |
 | 2026-10-06 | Unified [Imports](import-workflow.md), Sequence drag and drop, app-owned service startup |
+
+## Local search engine
+
+Since 2026-10-07, Latent can search with [EmbeddingGemma 2 on this Mac](local-embeddings.md) as an alternative to Gemini.
+It uses a separate index and becomes active only after validation and an explicit switch.
+The live library has the local encoder configured since 2026-10-07, but no local index yet, so Gemini remains active.
+Latent uses a self-contained copy of the llama.cpp build from the support commit, in `~/Library/Application Support/Latent/llama.cpp/4fbc76dec51d/`, with relative library paths.
+The pinned model files are APFS clones in `~/Library/Application Support/Latent/models/embeddinggemma-2-ba3888272494/`.
+Homebrew's `llama.cpp` 0.6.0 cannot load the model yet, and its `--HEAD` build fails against Homebrew's `ggml` 0.26.0.
+A full local index of the current 40,306 photos would take about 7.7 hours at the measured 1.45 photos per second.
 
 ## Candidate next work
 

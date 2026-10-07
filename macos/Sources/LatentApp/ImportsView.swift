@@ -16,7 +16,7 @@ extension LibraryModel {
     func monitorImports() async {
         while !Task.isCancelled {
             await refreshImports()
-            do { try await Task.sleep(for: .seconds(importActive || embeddingActive || showingImports ? 2 : 8)) }
+            do { try await Task.sleep(for: .seconds(importActive || embeddingActive || validationRunning || showingImports ? 2 : 8)) }
             catch { return }
         }
     }
@@ -40,10 +40,39 @@ extension LibraryModel {
             embeddingRuns = runs.runs
             workflowDataID = dataID
             if changed { await refreshCatalogSummary() }
+            await refreshSearchEngines(dataID: dataID, generation: generation)
         } catch {
             if generation == workflowGeneration, service.identity?.dataId == dataID {
                 workflowError = error.localizedDescription
             }
+        }
+    }
+
+    /// Older services lack engine choices; imports and AI Search keep working without them.
+    private func refreshSearchEngines(dataID: String, generation: Int) async {
+        let engines = try? await client.searchEngines()
+        guard service.identity?.dataId == dataID, workflowGeneration == generation, !workflowBusy else { return }
+        searchEngines = engines?.dataId == dataID ? engines : nil
+    }
+
+    var validationRunning: Bool { searchEngines?.backends.contains { $0.validation?.status == "running" } == true }
+
+    func validateEngine(_ engine: SearchEngine) {
+        guard workflowWritable, let dataID = workflowDataID else { return }
+        performWorkflow(dataID: dataID) {
+            try await self.client.validateSearchEngine(engine.key, dataID: dataID)
+            let engines = try await self.client.searchEngines()
+            if engines.dataId == dataID { self.searchEngines = engines }
+        }
+    }
+
+    func activateEngine(_ engine: SearchEngine) {
+        guard workflowWritable, let dataID = workflowDataID else { return }
+        performWorkflow(dataID: dataID) {
+            let engines = try await self.client.activateSearchEngine(engine, dataID: dataID)
+            guard engines.dataId == dataID, self.service.identity?.dataId == dataID else { return }
+            self.searchEngines = engines
+            await self.searchEngineChanged()
         }
     }
 
@@ -90,12 +119,12 @@ extension LibraryModel {
         }
     }
 
-    func reviewEmbeddings(scope: String, importID: String? = nil) {
+    func reviewEmbeddings(scope: String, importID: String? = nil, backend: String? = nil) {
         guard workflowWritable, let dataID = workflowDataID else { return }
         let ids = scope == "selected" ? selectedPhotos.map(\.id) : nil
         performWorkflow(dataID: dataID) {
             let response = try await self.client.prepareEmbeddings(id: UUID().uuidString.lowercased(), scope: scope,
-                ids: ids, importID: importID, dataID: dataID)
+                ids: ids, importID: importID, backend: backend, dataID: dataID)
             guard response.dataId == dataID, self.service.identity?.dataId == dataID else { return }
             self.embeddingRuns.insert(response.run, at: 0)
             self.embeddingReview = response.run
@@ -130,6 +159,7 @@ struct ImportsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var archiveReview: PhotoImport?
     @State private var embeddingScope = "incremental"
+    @State private var chosenEngine: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -138,7 +168,7 @@ struct ImportsView: View {
                     Text(model.importTab == "imports" ? "Imports" : "AI Search").font(.title2.bold())
                     Text(model.importTab == "imports"
                          ? "Build local previews and archive your originals."
-                         : "Review and confirm before generating photo embeddings.")
+                         : "Choose a search engine, then review before generating photo embeddings.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -304,31 +334,129 @@ struct ImportsView: View {
         }.padding(28).frame(width: 580)
     }
 
+    private var reviewEngine: SearchEngine? {
+        let engines = model.searchEngines
+        return engines?.backends.first { $0.key == (chosenEngine ?? engines?.active) }
+    }
+
+    private var engines: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Search engine").font(.headline)
+            if let list = model.searchEngines {
+                ForEach(list.backends) { engine in
+                    engineRow(engine, switchable: list.switchable)
+                    if engine.id != list.backends.last?.id { Divider() }
+                }
+            } else {
+                Text("This Latent service does not offer a choice of search engine. Quit and reopen Latent to update it.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func engineRow(_ engine: SearchEngine, switchable: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: engine.local ? "laptopcomputer" : "cloud").foregroundStyle(.secondary)
+                    .frame(width: 24, alignment: .leading)
+                Text(engine.displayName).font(.callout.weight(.semibold))
+                if engine.active {
+                    Text("In use").font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(.green.opacity(0.2), in: Capsule())
+                }
+                Spacer()
+                Text(engine.coverage).font(.caption).foregroundStyle(.secondary)
+            }
+            Text(engine.local
+                 ? "Encodes on this Mac; nothing is uploaded. Image search can't be refined with words yet."
+                 : "Sends small previews and search text to Google. Charged per photo.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let problem = engine.availability {
+                Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            } else if engine.local {
+                if let runtime = engine.runtime {
+                    Text("Model: \(runtime.label)").font(.caption).foregroundStyle(.secondary)
+                    if let error = runtime.error {
+                        Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                    }
+                }
+            }
+            if engine.requiresValidation, engine.index.indexedAssets == 0 {
+                Text("Generate its index below, then validate it before switching.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let validation = engine.validation {
+                HStack(spacing: 6) {
+                    if validation.status == "running" { ProgressView().controlSize(.mini) }
+                    Text(validation.label).font(.caption)
+                        .foregroundStyle(validation.status == "passed" ? Color.secondary : Color.orange)
+                }
+                ForEach(validation.failedChecks) { check in
+                    Text(check.detail).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                }
+                if let error = validation.error {
+                    Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                }
+            }
+            if engine.requiresValidation || (switchable && !engine.active) {
+                HStack {
+                    if engine.requiresValidation {
+                        Button(engine.validation?.status == "passed" ? "Validate again" : "Validate index") {
+                            model.validateEngine(engine)
+                        }
+                        .help("Checks stored vectors and re-encodes sample photos before this engine can be used")
+                        .disabled(!model.workflowWritable || !engine.canValidate || model.embeddingActive)
+                    }
+                    if switchable && !engine.active {
+                        Button("Use for search") { model.activateEngine(engine) }
+                            .buttonStyle(.glassProminent)
+                            .help(engine.coverage)
+                            .disabled(!model.workflowWritable || !engine.canActivate)
+                        if engine.canActivate, engine.index.indexedAssets < engine.index.totalAssets {
+                            Text("Only indexed photos will appear in search.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }.controlSize(.small).padding(.top, 2)
+            }
+        }.padding(.vertical, 4)
+    }
+
     private var embeddings: some View {
         VStack(alignment: .leading, spacing: 16) {
+            engines
             VStack(alignment: .leading, spacing: 10) {
                 Text("Generate photo embeddings").font(.headline)
-                Text("Enable text and image search using small previews sent to Gemini. Review the number of photos, upload size and estimated API cost before starting.")
+                Text(reviewEngine?.local == true
+                     ? "Build this engine's index on this Mac from small previews. Review the number of photos and estimated time before starting."
+                     : "Enable text and image search using small previews sent to Gemini. Review the number of photos, upload size and estimated API cost before starting.")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
+                    if let list = model.searchEngines {
+                        Picker("Engine", selection: Binding(get: { chosenEngine ?? list.active }, set: { chosenEngine = $0 })) {
+                            ForEach(list.backends) { Text($0.displayName).tag($0.key) }
+                        }.fixedSize()
+                    }
                     Picker("Scope", selection: $embeddingScope) {
                         Text("Incremental: missing embeddings").tag("incremental")
                         Text("All photos").tag("all")
                         Text("Selected photos (\(model.selectedPhotos.count))").tag("selected")
                     }
-                    Button("Review…") { model.reviewEmbeddings(scope: embeddingScope) }
+                    Button("Review…") { model.reviewEmbeddings(scope: embeddingScope, backend: reviewEngine?.key) }
                         .buttonStyle(.glassProminent)
                         .disabled(!model.workflowWritable || model.embeddingActive || (embeddingScope == "selected" && model.selectedPhotos.isEmpty))
                 }
                 Text("Existing embeddings are reused. Imports never start this step automatically.")
                     .font(.caption).foregroundStyle(.secondary)
-            }.padding(18).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+            }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(model.embeddingRuns) { run in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
                                 Text(run.title).font(.headline)
+                                Text(run.engineName).font(.caption).foregroundStyle(.secondary)
                                 Spacer()
                                 Text(run.label).font(.caption).foregroundStyle(.secondary)
                             }
@@ -339,7 +467,9 @@ struct ImportsView: View {
                             }
                             if let error = run.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
                             if run.status == "running" {
-                                Button("Pause after current request") { model.embeddingAction(run, action: "pause") }
+                                Button(run.isLocal ? "Pause after current photo" : "Pause after current request") {
+                                    model.embeddingAction(run, action: "pause")
+                                }
                                     .disabled(!model.workflowWritable)
                             } else if run.status != "complete" {
                                 Button(run.status == "prepared" ? "Review & confirm…" : "Review & resume…") {
@@ -370,10 +500,23 @@ private struct EmbeddingConfirmation: View {
                 GridRow { Text("Reviewed photos").foregroundStyle(.secondary); Text(run.selected.formatted()) }
                 GridRow { Text("Already indexed").foregroundStyle(.secondary); Text((run.reused + run.succeeded).formatted()) }
                 GridRow { Text("To generate").foregroundStyle(.secondary); Text(run.remaining.formatted()).bold() }
-                GridRow { Text("Planned preview upload").foregroundStyle(.secondary); Text(ByteCountFormatter.string(fromByteCount: run.uploadBytes, countStyle: .file)) }
-                GridRow { Text("Estimated remaining cost").foregroundStyle(.secondary); Text(run.remainingCost, format: .currency(code: "USD").precision(.fractionLength(4))) }
+                GridRow { Text("Engine").foregroundStyle(.secondary); Text(run.engineName) }
+                if run.isLocal {
+                    GridRow { Text("Upload").foregroundStyle(.secondary); Text("None") }
+                    if let seconds = run.remainingSeconds {
+                        GridRow {
+                            Text("Estimated time").foregroundStyle(.secondary)
+                            Text(Duration.seconds(seconds), format: .units(allowed: [.hours, .minutes], width: .wide, maximumUnitCount: 2))
+                        }
+                    }
+                } else {
+                    GridRow { Text("Planned preview upload").foregroundStyle(.secondary); Text(ByteCountFormatter.string(fromByteCount: run.uploadBytes, countStyle: .file)) }
+                    GridRow { Text("Estimated remaining cost").foregroundStyle(.secondary); Text(run.remainingCost, format: .currency(code: "USD").precision(.fractionLength(4))) }
+                }
             }
-            Text("Only the photos in this reviewed selection are included. Small previews are sent to Gemini (\(run.model)); original files stay where they are. Actual API charges may vary, including retries.")
+            Text(run.isLocal
+                 ? "Only the photos in this reviewed selection are included. Small previews are encoded on this Mac and nothing is uploaded. The model uses about 1.5 GB of memory while it is loaded; the time estimate is from an M2 Pro."
+                 : "Only the photos in this reviewed selection are included. Small previews are sent to Gemini (\(run.model)); original files stay where they are. Actual API charges may vary, including retries.")
                 .font(.callout).foregroundStyle(.secondary)
             if let error = model.workflowError { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
             HStack {

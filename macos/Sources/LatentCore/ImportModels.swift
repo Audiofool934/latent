@@ -91,7 +91,17 @@ public struct PhotoEmbeddingRun: Decodable, Identifiable, Sendable {
     public let uploadBytes: Int64
     public let estimatedCostUsd: Double
     public let model: String
+    public let backend: String?
+    public let engine: String?
+    public let local: Bool?
+    public let estimatedSeconds: Int?
     public var remaining: Int { max(0, toGenerate - succeeded) }
+    public var isLocal: Bool { local ?? false }
+    public var engineName: String { engine ?? "Gemini Embedding 2" }
+    public var remainingSeconds: Int? {
+        guard let estimatedSeconds, toGenerate > 0 else { return nil }
+        return Int((Double(estimatedSeconds) * Double(remaining) / Double(toGenerate)).rounded(.up))
+    }
     public var remainingCost: Double { toGenerate == 0 ? 0 : estimatedCostUsd * Double(remaining) / Double(toGenerate) }
     public var title: String {
         switch scope {

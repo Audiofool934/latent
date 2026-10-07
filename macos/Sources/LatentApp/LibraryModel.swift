@@ -57,6 +57,7 @@ final class LibraryModel {
     var workflowBusy = false
     var workflowError: String?
     var embeddingReview: PhotoEmbeddingRun?
+    var searchEngines: SearchEngineList?
     @ObservationIgnored var workflowDataID: String?
     @ObservationIgnored var workflowGeneration = 0
     var showingTimelapses = false
@@ -421,6 +422,10 @@ final class LibraryModel {
             return
         }
         if let referenceImage {
+            if !query.isEmpty, summary?.embeddingIndex?.imageTextQueries == false {
+                showNotice("Remove the words: this search engine matches by image only")
+                return
+            }
             navigate(to: .imageSearch(reference: referenceImage, query: query, order: searchOrder))
         } else {
             navigate(to: .search(query: query, order: searchOrder))
@@ -619,6 +624,18 @@ final class LibraryModel {
             Task { await refreshCatalogSummary() }
             if showingSequences { Task { await refreshSequences() } }
             else { navigate(to: source, filters: searchFilters) }
+        }
+    }
+
+    /// Saved query vectors belong to one engine, so an active search is re-run fresh after a switch.
+    func searchEngineChanged() async {
+        activeSearchHistoryID = nil
+        searchQueryWasCached = false
+        await refreshCatalogSummary()
+        await refreshSearchHistory()
+        switch source {
+        case .search, .imageSearch: navigate(to: source, preservingSelection: true, filters: searchFilters)
+        default: break
         }
     }
 

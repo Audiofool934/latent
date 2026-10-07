@@ -6,7 +6,7 @@ import math
 import sqlite3
 import struct
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -122,9 +122,14 @@ class EmbeddingStore:
         *,
         model_id: str = DEFAULT_EMBEDDING_MODEL,
         dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
+        metadata: Mapping[str, str] | None = None,
     ) -> None:
         if dimensions < 1:
             raise ValueError("embedding dimensions must be positive")
+        self.metadata = dict(metadata or {})
+        reserved = {"schema_version", "model_id", "dimensions", "dtype"} & self.metadata.keys()
+        if reserved:
+            raise ValueError(f"embedding metadata cannot override {sorted(reserved)}")
         self.embedding_dir = embedding_dir.expanduser().resolve()
         self.embedding_dir.mkdir(parents=True, exist_ok=True)
         self.database_path = self.embedding_dir / "index.sqlite"
@@ -197,11 +202,13 @@ class EmbeddingStore:
         self.connection.commit()
 
     def _validate_configuration(self) -> None:
+        # Extra metadata records the artifact and preprocessing of one index generation.
         expected = {
             "schema_version": str(EMBEDDING_SCHEMA_VERSION),
             "model_id": self.model_id,
             "dimensions": str(self.dimensions),
             "dtype": EMBEDDING_DTYPE,
+            **{key: str(value) for key, value in self.metadata.items()},
         }
         rows = {
             str(row["key"]): str(row["value"])
@@ -215,7 +222,9 @@ class EmbeddingStore:
             self.connection.commit()
             return
         mismatches = {
-            key: (rows.get(key), value) for key, value in expected.items() if rows.get(key) != value
+            key: (rows.get(key), expected.get(key))
+            for key in expected.keys() | rows.keys()
+            if rows.get(key) != expected.get(key)
         }
         if mismatches:
             details = ", ".join(
@@ -634,6 +643,7 @@ class EmbeddingStore:
             "model_id": self.model_id,
             "dimensions": self.dimensions,
             "dtype": EMBEDDING_DTYPE,
+            "metadata": dict(self.metadata),
             "database_path": str(self.database_path),
             "database_integrity": integrity,
             "jobs": self.job_counts(),

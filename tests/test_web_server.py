@@ -665,7 +665,10 @@ def test_semantic_and_visual_similarity_apis_return_ranked_local_assets(
             "semantic_ready": True,
             "model_id": DEFAULT_EMBEDDING_MODEL,
             "dimensions": 4,
-            "provider": "gemini_api",
+            "provider": "fixed",
+            "backend": "fixed",
+            "engine": DEFAULT_EMBEDDING_MODEL,
+            "image_text_queries": True,
         }
 
         for headers in (

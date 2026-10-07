@@ -10,6 +10,7 @@ import mimetypes
 import re
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
 from http import HTTPStatus
@@ -22,8 +23,27 @@ from uuid import UUID
 
 from .curator import build_grounded_curator_report, build_grounded_motif_report
 from .editing import DEFAULT_EDITING_DIR, EditingManager
+from .embedding_backends import (
+    EMBEDDINGGEMMA,
+    EMBEDDINGGEMMA_PROFILE,
+    GEMINI,
+    GEMINI_PROFILE,
+    BackendSelection,
+    EmbeddingEngine,
+    EmbeddingProfile,
+    current_validation,
+    engine_dirs,
+    validate_index,
+)
 from .embedding_runs import EmbeddingRuns
-from .embeddings import EmbeddingStore
+from .embeddinggemma import (
+    ARTIFACT_REPOSITORY,
+    ARTIFACT_REVISION,
+    EmbeddingGemmaEncoder,
+    EmbeddingGemmaRuntime,
+    check_files,
+    load_runtime_config,
+)
 from .errors import ConfigurationError
 from .filters import matching_ids, photo_filters
 from .gemini import GEMINI_STORE_NAME, GeminiEmbeddingEncoder
@@ -59,7 +79,18 @@ _IMPORT_PATH = re.compile(
     r"^/api/imports/([a-f0-9-]+)/(start|resume|pause|destination|archive|retry_previews)$"
 )
 _EMBEDDING_RUN_PATH = re.compile(r"^/api/embedding-runs/([a-f0-9-]+)/(start|resume|pause)$")
+_BACKEND_VALIDATE_PATH = re.compile(r"^/api/search-backends/([a-z0-9-]+)/validate$")
 _MAX_JSON_BODY_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class ActiveSearch:
+    """One vector space per request: its index, saved query vectors, and encoder."""
+
+    engine: EmbeddingEngine
+    vector_index: VectorIndex
+    history: SearchHistory
+    semantic: SemanticSearch
 
 
 class LibraryServer(ThreadingHTTPServer):
@@ -85,21 +116,47 @@ class LibraryServer(ThreadingHTTPServer):
             else (self.state_dir.parent / "workspace").resolve()
         )
         self.workspace_writes_enabled = _is_loopback(address[0])
-        resolved_embedding_dir = (
+        gemini_dir = (
             embedding_dir.expanduser().resolve()
             if embedding_dir is not None
             else self.state_dir / "embeddings" / GEMINI_STORE_NAME
         )
-        self.vector_index = vector_index or VectorIndex(resolved_embedding_dir)
-        self.service_info = service_identity(
-            self.state_dir, self.vector_index.embedding_dir, self.workspace_dir
-        )
-        self.search_history = SearchHistory(
-            self.workspace_dir / "search-history.sqlite", library_id=self.service_info["data_id"],
-            model_id=self.vector_index.model_id, dimensions=self.vector_index.dimensions,
-        )
-        self._semantic_search = semantic_search
-        self._semantic_lock = threading.Lock()
+        # The configured Gemini index anchors library identity, so switching engines
+        # never changes data_id; the local index lives beside it.
+        self.embeddings_root = gemini_dir.parent
+        self.local_runtime = EmbeddingGemmaRuntime(self.embeddings_root)
+        dirs = engine_dirs(gemini_dir)
+        self.engines: dict[str, EmbeddingEngine] = {
+            GEMINI: EmbeddingEngine(
+                GEMINI_PROFILE, dirs[GEMINI], GeminiEmbeddingEncoder, _gemini_preflight
+            ),
+            EMBEDDINGGEMMA: EmbeddingEngine(
+                EMBEDDINGGEMMA_PROFILE, dirs[EMBEDDINGGEMMA],
+                lambda: EmbeddingGemmaEncoder(self.local_runtime), self._local_preflight,
+            ),
+        }
+        self.selection: BackendSelection | None = BackendSelection(self.embeddings_root)
+        self._fixed_search: tuple[VectorIndex, SemanticSearch | None] | None = None
+        identity_dir = gemini_dir
+        if vector_index is not None:
+            # A supplied index (tests and tools) is the only engine and cannot be switched.
+            fixed = EmbeddingProfile(
+                key="fixed", display_name=vector_index.model_id, model_id=vector_index.model_id,
+                dimensions=vector_index.dimensions, store_name=vector_index.embedding_dir.name,
+                provider="fixed", metadata=vector_index.metadata,
+            )
+            self.engines = {
+                "fixed": EmbeddingEngine(fixed, vector_index.embedding_dir, GeminiEmbeddingEncoder)
+            }
+            self.selection = None
+            self._fixed_search = (vector_index, semantic_search)
+            identity_dir = vector_index.embedding_dir
+        self.service_info = service_identity(self.state_dir, identity_dir, self.workspace_dir)
+        self._search_lock = threading.Lock()
+        self._search: ActiveSearch | None = None
+        self._search_stamp: object = object()
+        self._validations: dict[str, threading.Thread] = {}
+        self._validation_errors: dict[str, str] = {}
         super().__init__(address, LibraryRequestHandler)
         try:
             self.locations = LocationsStore(self.workspace_dir, self.state_dir)
@@ -111,8 +168,8 @@ class LibraryServer(ThreadingHTTPServer):
             self.imports = ImportManager(self.locations)
             self.folder_indexer = FolderIndexer(self.locations, self.imports)
             self.embedding_runs = EmbeddingRuns(
-                self.state_dir, self.vector_index.embedding_dir, self.workspace_dir,
-                model_id=self.vector_index.model_id, dimensions=self.vector_index.dimensions,
+                self.state_dir, self.workspace_dir, engines=self.engines,
+                default_backend=lambda: self.search.engine.profile.key,
             )
         except Exception:
             super().server_close()
@@ -129,20 +186,156 @@ class LibraryServer(ThreadingHTTPServer):
             indexer.close()
         if editing := getattr(self, "editing", None):
             editing.close()
+        if runtime := getattr(self, "local_runtime", None):
+            runtime.close()
         super().server_close()
 
-    def get_semantic_search(self) -> SemanticSearch:
-        if self._semantic_search is not None:
-            return self._semantic_search
-        with self._semantic_lock:
-            if self._semantic_search is None:
-                self._semantic_search = SemanticSearch(
-                    self.vector_index,
-                    GeminiEmbeddingEncoder(),
-                )
-        return self._semantic_search
+    @property
+    def search(self) -> ActiveSearch:
+        """The active engine, reloaded only after an explicit activation changes it."""
+        with self._search_lock:
+            if self._fixed_search is not None:
+                if self._search is None:
+                    index, semantic = self._fixed_search
+                    engine = self.engines["fixed"]
+                    self._search = self._build_search(engine, index, semantic)
+                return self._search
+            assert self.selection is not None
+            stamp = self.selection.stamp()
+            if self._search is None or stamp != self._search_stamp:
+                engine = self.engines[self.selection.read()["backend"]]
+                if self._search is None or self._search.engine is not engine:
+                    self._search = self._build_search(engine)
+                self._search_stamp = stamp
+            return self._search
 
-    def embedding_progress(self, *, total_assets: int | None = None) -> dict[str, object]:
+    def _build_search(
+        self,
+        engine: EmbeddingEngine,
+        index: VectorIndex | None = None,
+        semantic: SemanticSearch | None = None,
+    ) -> ActiveSearch:
+        profile = engine.profile
+        index = index or VectorIndex(
+            engine.embedding_dir, model_id=profile.model_id, dimensions=profile.dimensions,
+            metadata=profile.metadata,
+        )
+        history = SearchHistory(
+            self.workspace_dir / "search-history.sqlite", library_id=self.service_info["data_id"],
+            model_id=profile.space_id, dimensions=profile.dimensions,
+        )
+        return ActiveSearch(engine, index, history, semantic or SemanticSearch(
+            index, engine.encoder_factory()
+        ))
+
+    @property
+    def vector_index(self) -> VectorIndex:
+        return self.search.vector_index
+
+    @property
+    def search_history(self) -> SearchHistory:
+        return self.search.history
+
+    def _local_preflight(self) -> None:
+        config = load_runtime_config(self.embeddings_root)
+        if config is None:
+            raise ConfigurationError(
+                "Set up the local encoder first with `latent local-encoder setup`"
+            )
+        check_files(config)
+
+    def search_backends(self) -> dict[str, object]:
+        active = self.search.engine
+        backends = []
+        with StateStore(self.state_dir) as store:
+            total_assets = store.library_asset_count()
+        for key, engine in self.engines.items():
+            entry: dict[str, object] = {
+                **engine.profile.public(),
+                "active": engine is active,
+                "index": self.embedding_progress(engine, total_assets=total_assets),
+            }
+            try:
+                if engine.preflight is not None:
+                    engine.preflight()
+                entry.update(available=True, availability=None)
+            except ConfigurationError as error:
+                entry.update(available=False, availability=str(error))
+            if key == EMBEDDINGGEMMA:
+                config = load_runtime_config(self.embeddings_root) if entry["available"] else None
+                entry["runtime"] = {
+                    **self.local_runtime.status(),
+                    "llama_server": str(config.llama_server) if config else None,
+                    "model_dir": str(config.model_dir) if config else None,
+                }
+                entry["artifact"] = {
+                    "repository": ARTIFACT_REPOSITORY, "revision": ARTIFACT_REVISION,
+                }
+            if engine.profile.requires_validation:
+                entry["validation"] = self._validation_status(engine)
+            backends.append(entry)
+        return {
+            "active": active.profile.key,
+            "switchable": self.selection is not None,
+            "backends": backends,
+            "data_id": self.service_info["data_id"],
+        }
+
+    def _validation_status(self, engine: EmbeddingEngine) -> dict[str, object]:
+        key = engine.profile.key
+        thread = self._validations.get(key)
+        if thread is not None and thread.is_alive():
+            return {"status": "running"}
+        if error := self._validation_errors.get(key):
+            return {"status": "error", "error": error}
+        report = current_validation(engine)
+        if report is None:
+            return {"status": "not_run"}
+        status = "stale" if report.get("stale") else "passed" if report["passed"] else "failed"
+        return {**report, "status": status}
+
+    def start_validation(self, backend: str) -> dict[str, object]:
+        engine = self.engines.get(backend)
+        if engine is None or not engine.profile.requires_validation:
+            raise ValueError("This search engine does not use local validation")
+        with self._search_lock:
+            thread = self._validations.get(backend)
+            if thread is not None and thread.is_alive():
+                return self._validation_status(engine)
+            if self.embedding_runs.active_backend == backend:
+                raise ValueError("Pause or finish the running AI Search generation first")
+            if engine.preflight is not None:
+                engine.preflight()
+            self._validation_errors.pop(backend, None)
+
+            def run() -> None:
+                try:
+                    validate_index(engine, self.state_dir, engine.encoder_factory())
+                except Exception as error:
+                    self._validation_errors[backend] = str(error)
+
+            thread = threading.Thread(target=run, name="latent-index-validation", daemon=True)
+            self._validations[backend] = thread
+            thread.start()
+        return {"status": "running"}
+
+    def activate_backend(self, backend: str, validation_id: object) -> dict[str, object]:
+        if self.selection is None:
+            raise ValueError("This service uses a fixed search index")
+        engine = self.engines.get(backend)
+        if engine is None:
+            raise ValueError(f"Unknown search engine: {backend}")
+        if engine.profile.requires_validation:
+            report = current_validation(engine)
+            if report is None or report.get("id") != validation_id:
+                raise ValueError("The validation changed. Review the latest result first")
+        with self._search_lock:
+            self.selection.activate(engine)
+        return self.search_backends()
+
+    def embedding_progress(
+        self, engine: EmbeddingEngine | None = None, *, total_assets: int | None = None,
+    ) -> dict[str, object]:
         with StateStore(self.state_dir) as store:
             hidden_ids = [
                 int(row[0])
@@ -154,7 +347,8 @@ class LibraryServer(ThreadingHTTPServer):
         if total_assets is None:
             with StateStore(self.state_dir) as store:
                 total_assets = store.library_asset_count()
-        index = self.vector_index
+        engine = engine or self.search.engine
+        profile = engine.profile
         progress = {
             "queued_assets": 0,
             "indexed_assets": 0,
@@ -162,11 +356,9 @@ class LibraryServer(ThreadingHTTPServer):
             "jobs": dict.fromkeys(("pending", "running", "succeeded", "failed"), 0),
         }
         unavailable = False
-        if (index.embedding_dir / "index.sqlite").is_file():
+        if engine.has_index():
             try:
-                with EmbeddingStore(
-                    index.embedding_dir, model_id=index.model_id, dimensions=index.dimensions
-                ) as store:
+                with engine.store() as store:
                     progress = store.progress(exclude_asset_ids=hidden_ids)
             except ConfigurationError:
                 unavailable = True
@@ -191,10 +383,18 @@ class LibraryServer(ThreadingHTTPServer):
             "remaining_assets": max(0, total_assets - indexed),
             "phase": phase,
             "semantic_ready": indexed > 0,
-            "model_id": index.model_id,
-            "dimensions": index.dimensions,
-            "provider": "gemini_api",
+            "model_id": profile.model_id,
+            "dimensions": profile.dimensions,
+            "provider": profile.provider,
+            "backend": profile.key,
+            "engine": profile.display_name,
+            "image_text_queries": profile.image_text_queries,
         }
+
+
+def _gemini_preflight() -> None:
+    if not GeminiEmbeddingEncoder.credentials_available():
+        raise ConfigurationError("Configure a Gemini API key before generating photo embeddings")
 
 
 class LibraryRequestHandler(BaseHTTPRequestHandler):
@@ -211,6 +411,8 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 self._serve_library()
             elif parsed.path == "/api/embedding-status":
                 self._send_json({**self.server.embedding_progress(), "cloud_access": False})
+            elif parsed.path == "/api/search-backends":
+                self._send_json(self.server.search_backends())
             elif parsed.path == "/api/assets":
                 self._serve_assets(parse_qs(parsed.query))
             elif parsed.path == "/api/timelapse":
@@ -364,6 +566,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                                 "scope",
                                 "asset_ids",
                                 "batch_id",
+                                "backend",
                             },
                             required={"expected_data_id", "request_id", "scope"},
                         )
@@ -379,8 +582,12 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                             ids = self.server.imports.asset_ids(batch_id)
                         elif batch_id is not None:
                             raise ValueError("Only import scope accepts a batch ID")
+                        backend = payload.get("backend")
+                        if backend is not None and not isinstance(backend, str):
+                            raise ValueError("backend must be a string")
                         result = self.server.embedding_runs.prepare(
-                            payload["request_id"], payload["scope"], ids, batch_id=batch_id
+                            payload["request_id"], payload["scope"], ids, batch_id=batch_id,
+                            backend=backend,
                         )
                     else:
                         _validate_json_keys(
@@ -393,6 +600,26 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                             match.group(1), match.group(2), payload["expected_revision"]
                         )
                 self._send_json({"run": result, "data_id": self.server.service_info["data_id"]})
+            elif method == "POST" and (match := _BACKEND_VALIDATE_PATH.fullmatch(parsed.path)):
+                payload = self._read_json_body()
+                _validate_json_keys(
+                    payload, allowed={"expected_data_id"}, required={"expected_data_id"}
+                )
+                self._validate_workspace_identity(payload)
+                self._send_json({"validation": self.server.start_validation(match.group(1))})
+            elif method == "POST" and parsed.path == "/api/search-backends/activate":
+                payload = self._read_json_body()
+                _validate_json_keys(
+                    payload,
+                    allowed={"expected_data_id", "backend", "validation_id"},
+                    required={"expected_data_id", "backend"},
+                )
+                self._validate_workspace_identity(payload)
+                if not isinstance(payload["backend"], str):
+                    raise ValueError("backend must be a string")
+                self._send_json(self.server.activate_backend(
+                    payload["backend"], payload.get("validation_id")
+                ))
             elif method == "POST" and parsed.path == "/api/timelapse/audit":
                 payload = self._read_json_body()
                 _validate_json_keys(
@@ -846,17 +1073,18 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         variety = _single(query, "variety") or "0"
         if variety not in ("0", "1"):
             raise ValueError("variety must be 0 or 1")
-        if self.server.vector_index.size == 0:
+        search = self.server.search
+        if search.vector_index.size == 0:
             raise ConfigurationError("semantic index has no completed vectors")
         self._require_search_access()
         order = _search_order(query, variety=variety == "1")
         filters = self._query_filters(query)
         allowed = self._matching_ids(filters)
-        entry, vector, cached = self.server.search_history.resolve(
+        entry, vector, cached = search.history.resolve(
             query=search_query, image=None, image_name=None, filters=filters, order=order,
-            encode=lambda: self.server.get_semantic_search().text_vector(search_query),
+            encode=lambda: search.semantic.text_vector(search_query),
         )
-        matches = self.server.vector_index.search_vector(
+        matches = search.vector_index.search_vector(
             vector, limit=limit, order=order, allowed_asset_ids=allowed,
         )
         self._send_matches(
@@ -866,6 +1094,7 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 "query_cached": cached,
                 "ranking": "relevance_with_variety" if order == "variety" else "relevance",
                 "order": order,
+                "backend": search.engine.profile.key,
             },
         )
 
@@ -907,22 +1136,27 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
         order = payload.get("order", "closest")
         if order not in ("closest", "least_similar", "variety"):
             raise ValueError("order must be closest, least_similar, or variety")
-        if self.server.vector_index.size == 0:
+        search = self.server.search
+        if query and not search.engine.profile.image_text_queries:
+            raise ValueError(
+                f"Adding words to a reference image is not available with "
+                f"{search.engine.profile.display_name} yet"
+            )
+        if search.vector_index.size == 0:
             raise ConfigurationError("semantic index has no completed vectors")
         filters = photo_filters(payload.get("filters", {}))
         allowed = self._matching_ids(filters)
-        entry, vector, cached = self.server.search_history.resolve(
+        entry, vector, cached = search.history.resolve(
             query=query, image=data, image_name=image_name, filters=filters, order=order,
-            encode=lambda: self.server.get_semantic_search().encoder.encode_image_query(
-                data, query
-            ),
+            encode=lambda: search.semantic.encoder.encode_image_query(data, query),
         )
-        matches = self.server.vector_index.search_vector(
+        matches = search.vector_index.search_vector(
             vector, limit=limit, order=order, allowed_asset_ids=allowed,
         )
         self._send_matches(matches, {
             "mode": "image_search", "query": query, "order": order,
             "history_id": entry["id"], "query_cached": cached,
+            "backend": search.engine.profile.key,
         })
 
     def _replay_search(self, identifier: str, payload: dict[str, Any]) -> None:
@@ -936,13 +1170,15 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("order must be closest, least_similar, or variety")
         filters = photo_filters(payload["filters"])
         allowed = self._matching_ids(filters)
-        entry, vector = self.server.search_history.replay(identifier, filters=filters, order=order)
-        matches = self.server.vector_index.search_vector(
+        search = self.server.search
+        entry, vector = search.history.replay(identifier, filters=filters, order=order)
+        matches = search.vector_index.search_vector(
             vector, limit=100, order=order, allowed_asset_ids=allowed,
         )
         self._send_matches(matches, {
             "mode": "image_search" if entry["kind"] == "image" else "semantic",
             "query": entry["query"], "order": order, "history_id": identifier, "query_cached": True,
+            "backend": search.engine.profile.key,
         })
 
     def _serve_similar(
@@ -1391,10 +1627,10 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
 
     def _relation_basis(self) -> dict[str, str]:
         return {
-            "model_id": self.server.vector_index.model_id,
+            "model_id": self.server.search.engine.profile.model_id,
             "metric": "cosine_similarity",
             "source": "local_contact_embeddings",
-            "embedding_provider": "gemini_api",
+            "embedding_provider": self.server.search.engine.profile.provider,
             "interpretation": (
                 "Similarity is model evidence, not proof of place, identity, or story."
             ),

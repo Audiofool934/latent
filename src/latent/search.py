@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -56,10 +56,12 @@ class VectorIndex:
         *,
         model_id: str = DEFAULT_EMBEDDING_MODEL,
         dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
+        metadata: Mapping[str, str] | None = None,
     ) -> None:
         self.embedding_dir = embedding_dir.expanduser().resolve()
         self.model_id = model_id
         self.dimensions = dimensions
+        self.metadata = dict(metadata or {})
         self._lock = threading.RLock()
         self._revision: tuple[int, str, str, int, int] | None = None
         self._asset_ids = np.empty((0,), dtype=np.int64)
@@ -85,6 +87,7 @@ class VectorIndex:
                 self.embedding_dir,
                 model_id=self.model_id,
                 dimensions=self.dimensions,
+                metadata=self.metadata,
             ) as store,
         ):
             revision = store.vector_revision()

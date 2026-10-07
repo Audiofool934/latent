@@ -290,7 +290,8 @@ struct LibraryView: View {
                 .accessibilityIdentifier("search-reference-image")
             }
             NativeSearchField(text: $model.searchText, focusRequest: model.focusSearchRequest,
-                              placeholder: model.referenceImage == nil ? (model.summary?.searchPlaceholder ?? "Search indexed photos") : "Add words to refine…") {
+                              placeholder: model.referenceImage == nil ? (model.summary?.searchPlaceholder ?? "Search indexed photos")
+                                : model.summary?.embeddingIndex?.imageTextQueries == false ? "Press Return to search by image" : "Add words to refine…") {
                 model.submitSearch()
             }
             .frame(height: 20)

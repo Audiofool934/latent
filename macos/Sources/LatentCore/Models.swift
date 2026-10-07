@@ -86,6 +86,8 @@ public struct LibrarySummary: Decodable, Sendable {
 
 public struct SearchIndexSummary: Decodable, Sendable {
     public let phase: String
+    public let engine: String?
+    public let imageTextQueries: Bool?
 }
 
 public struct WorkspaceSummary: Decodable, Sendable {

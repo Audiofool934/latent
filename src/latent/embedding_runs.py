@@ -3,46 +3,42 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from .embeddings import EmbeddingStore, EmbeddingWorker, load_embedding_assets
+from .embedding_backends import GEMINI, EmbeddingEngine
+from .embeddings import EmbeddingWorker, load_embedding_assets
 from .errors import ConfigurationError
-from .gemini import (
-    GEMINI_DIMENSIONS,
-    GEMINI_IMAGE_ESTIMATE_USD,
-    GEMINI_MODEL,
-    GeminiEmbeddingEncoder,
-)
 from .workspace import utc_now, write_workspace_export
 
 
 class EmbeddingRuns:
+    """Each reviewed selection is bound to one engine and writes only that engine's index."""
+
     def __init__(
         self,
         state_dir: Path,
-        embedding_dir: Path,
         workspace_dir: Path,
         *,
-        encoder_factory=GeminiEmbeddingEncoder,
-        model_id=GEMINI_MODEL,
-        dimensions=GEMINI_DIMENSIONS,
+        engines: Mapping[str, EmbeddingEngine],
+        default_backend: Callable[[], str] = lambda: GEMINI,
     ) -> None:
         self.state_dir = state_dir
-        self.embedding_dir = embedding_dir
         self.root = workspace_dir / "embedding-runs"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.encoder_factory = encoder_factory
-        self.model_id = model_id
-        self.dimensions = dimensions
+        self.engines = dict(engines)
+        self.default_backend = default_backend
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.worker: threading.Thread | None = None
         self.active_id: str | None = None
+        self.active_backend: str | None = None
         for path in self.root.glob("*/status.json"):
             state = json.loads(path.read_text())
             if state["status"] == "running":
@@ -92,17 +88,26 @@ class EmbeddingRuns:
             db.close()
         return [a for a in assets if a.identity not in hidden]
 
-    def _valid(self) -> set[tuple[int, str]]:
-        path = self.embedding_dir / "index.sqlite"
+    def engine(self, backend: str) -> EmbeddingEngine:
+        try:
+            return self.engines[backend]
+        except KeyError:
+            raise ValueError(f"Unknown search engine: {backend}") from None
+
+    @staticmethod
+    def _valid(engine: EmbeddingEngine) -> set[tuple[int, str]]:
+        path = engine.embedding_dir / "index.sqlite"
         if not path.is_file():
             return set()
         db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
         try:
             metadata = dict(db.execute("SELECT key,value FROM embedding_meta"))
-            if (metadata.get("model_id"), metadata.get("dimensions")) != (
-                self.model_id,
-                str(self.dimensions),
-            ):
+            expected = {
+                "model_id": engine.profile.model_id,
+                "dimensions": str(engine.profile.dimensions),
+                **engine.profile.metadata,
+            }
+            if any(metadata.get(key) != value for key, value in expected.items()):
                 raise ConfigurationError(
                     "The embedding index uses a different model. "
                     "Choose the matching index before reviewing photo embeddings"
@@ -124,15 +129,19 @@ class EmbeddingRuns:
         asset_ids: list[int] | None = None,
         *,
         batch_id: str | None = None,
+        backend: str | None = None,
     ) -> dict:
         with self.lock:
             folder = self._folder(identifier)
+            engine = self.engine(backend or self.default_backend())
             if scope not in {"all", "incremental", "selected", "import"}:
                 raise ValueError(
                     "Choose all photos, incremental, selected photos or an import batch"
                 )
             requested = sorted(set(asset_ids or []))
             request = {"scope": scope, "asset_ids": requested, "batch_id": batch_id}
+            if engine.profile.key != GEMINI:
+                request["backend"] = engine.profile.key
             if (folder / "plan.json").is_file():
                 previous = json.loads((folder / "plan.json").read_text())
                 if previous["request"] != request:
@@ -141,7 +150,7 @@ class EmbeddingRuns:
                     )
                 return self.get(identifier)
             assets = self._assets()
-            valid = self._valid()
+            valid = self._valid(engine)
             if scope in {"selected", "import"}:
                 if not requested:
                     raise ValueError("Select at least one photo with a ready preview")
@@ -161,6 +170,7 @@ class EmbeddingRuns:
                 (self.state_dir / "cache" / a.contact_relative_path).stat().st_size
                 for a in candidates
             )
+            profile = engine.profile
             state = {
                 "id": identifier,
                 "created_at": utc_now(),
@@ -174,17 +184,25 @@ class EmbeddingRuns:
                 "to_generate": len(candidates),
                 "succeeded": 0,
                 "failed": 0,
-                "upload_bytes": total_bytes,
-                "estimated_cost_usd": round(len(candidates) * GEMINI_IMAGE_ESTIMATE_USD, 6),
-                "model": self.model_id,
+                "upload_bytes": total_bytes if profile.sends_previews else 0,
+                "estimated_cost_usd": round(len(candidates) * profile.image_cost_usd, 6),
+                "estimated_seconds": math.ceil(len(candidates) / profile.images_per_second)
+                if profile.images_per_second else None,
+                "model": profile.model_id,
+                "backend": profile.key,
+                "engine": profile.display_name,
+                "provider": profile.provider,
+                "local": not profile.sends_previews,
             }
             write_workspace_export(
                 folder / "plan.json",
                 {
                     "request": request,
                     "photos": [asdict(a) for a in candidates],
-                    "model": self.model_id,
-                    "dimensions": self.dimensions,
+                    "model": profile.model_id,
+                    "dimensions": profile.dimensions,
+                    "backend": profile.key,
+                    "space_id": profile.space_id,
                 },
             )
             self._save(state)
@@ -204,7 +222,11 @@ class EmbeddingRuns:
             if self.busy:
                 raise ValueError("Another embedding selection is running. Pause it first")
             plan = json.loads((self._folder(identifier) / "plan.json").read_text())
-            if (plan["model"], plan["dimensions"]) != (self.model_id, self.dimensions):
+            engine = self.engine(plan.get("backend", GEMINI))
+            profile = engine.profile
+            if (plan["model"], plan["dimensions"], plan.get("space_id", profile.space_id)) != (
+                profile.model_id, profile.dimensions, profile.space_id
+            ):
                 raise ValueError("The embedding model changed. Review a new selection")
             available = {a.asset_id: a for a in self._assets()}
             for photo in plan["photos"]:
@@ -214,7 +236,7 @@ class EmbeddingRuns:
                         "A reviewed photo was removed or changed. "
                         "Review a new selection before generating"
                     )
-            valid = self._valid()
+            valid = self._valid(engine)
             assets = [
                 available[p["asset_id"]]
                 for p in plan["photos"]
@@ -226,25 +248,19 @@ class EmbeddingRuns:
                 )
                 self._save(state)
                 return state
-            if (
-                self.encoder_factory is GeminiEmbeddingEncoder
-                and not GeminiEmbeddingEncoder.credentials_available()
-            ):
-                raise ConfigurationError(
-                    "Configure a Gemini API key before generating photo embeddings"
-                )
+            if engine.preflight is not None:
+                engine.preflight()
             self.stop.clear()
             self.active_id = identifier
+            self.active_backend = profile.key
             completed_before = state["to_generate"] - len(assets)
             state.update(status="running", error=None, succeeded=completed_before, failed=0)
             self._save(state)
 
             def run():
                 try:
-                    encoder = self.encoder_factory()
-                    with EmbeddingStore(
-                        self.embedding_dir, model_id=self.model_id, dimensions=self.dimensions
-                    ) as store:
+                    encoder = engine.encoder_factory()
+                    with engine.store() as store:
                         store.sync_assets(assets, retry_failed=True, prune_missing=False)
 
                         def progress(result):
@@ -256,7 +272,7 @@ class EmbeddingRuns:
                         with store.job_scope([a.asset_id for a in assets]):
                             result = EmbeddingWorker(store, encoder, self.state_dir / "cache").run(
                                 max_jobs=len(assets),
-                                batch_size=8,
+                                batch_size=profile.batch_size,
                                 stale_after=timedelta(seconds=0),
                                 progress=progress,
                                 stop_requested=self.stop.is_set,
@@ -278,6 +294,7 @@ class EmbeddingRuns:
                 finally:
                     self._save(state)
                     self.active_id = None
+                    self.active_backend = None
 
             self.worker = threading.Thread(target=run, name="latent-user-embeddings", daemon=True)
             self.worker.start()

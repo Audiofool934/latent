@@ -5,6 +5,7 @@ Updated: 2026-10-04.
 Latent uses the Gemini Developer API for photo embeddings, natural-language queries, and reference-image queries with optional text.
 The model is `gemini-embedding-2`, with 3,072 dimensions stored as normalized float16 vectors.
 Cosine ranking, similar-photo discovery, motif clustering, Sequences, and photo browsing remain local.
+Gemini is the default engine; an optional on-device engine with its own index is described in [local EmbeddingGemma 2 search](local-embeddings.md).
 
 ## Data and credentials
 
