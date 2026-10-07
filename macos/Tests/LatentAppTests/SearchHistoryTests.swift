@@ -47,8 +47,8 @@ private final class HistoryProtocol: URLProtocol, @unchecked Sendable {
 @MainActor @Suite(.serialized)
 struct SearchHistoryTests {
     @Test func replayAndFilterOrOrderChangesUseOnlyCachedQueries() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         model.navigate(to: .search(query: "blue snow", order: .closest))
         try await settled(model)
         #expect(!model.searchQueryWasCached)
@@ -74,8 +74,8 @@ struct SearchHistoryTests {
     }
 
     @Test func aRemovedSearchNeverFallsBackToAPaidRequest() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         await model.refreshSearchHistory()
         HistoryProtocol.missing.withLock { $0 = true }
         model.replaySearch(model.searchHistory[0])
@@ -85,10 +85,10 @@ struct SearchHistoryTests {
     }
 
     @Test func infoVisibilitySurvivesReopeningTheLibrary() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         model.showingPhotoInfo = true
-        let restored = LibraryModel(client: model.client, preferences: preferences)
+        let restored = LibraryModel(client: model.client, preferences: model.preferences)
         defer { restored.shutdownService() }
         #expect(restored.showingPhotoInfo)
     }
@@ -105,8 +105,8 @@ struct SearchHistoryTests {
     }
 
     @Test func movedInfoPositionIsSavedAndRestoredByTheNativeWindow() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         let owner = NSWindow(contentRect: NSRect(x: 180, y: 180, width: 900, height: 620),
             styleMask: [.titled], backing: .buffered, defer: false)
         owner.isReleasedWhenClosed = false
@@ -123,7 +123,7 @@ struct SearchHistoryTests {
         let chosen = NSRect(x: screen.minX + 40, y: screen.minY + 40, width: 312, height: 358)
         panel.setFrame(chosen, display: true)
         try await Task.sleep(for: .milliseconds(20))
-        let saved = try #require(preferences.string(forKey: "photoInfoPanelFrame"))
+        let saved = try #require(model.preferences.string(forKey: "photoInfoPanelFrame"))
         #expect(NSRectFromString(saved) == chosen)
         coordinator.close()
 
@@ -134,7 +134,7 @@ struct SearchHistoryTests {
         let restored = try #require(owner.childWindows?.first as? PhotoInfoPanel.Panel)
         #expect(restored.frame == chosen)
         reopened.resetIfNeeded(UUID())
-        #expect(preferences.string(forKey: "photoInfoPanelFrame") == nil)
+        #expect(model.preferences.string(forKey: "photoInfoPanelFrame") == nil)
         #expect(restored.frame != chosen)
     }
 
@@ -161,17 +161,15 @@ struct SearchHistoryTests {
         #expect(handle.acceptsFirstMouse(for: down))
     }
 
-    private func fixture() async throws -> (LibraryModel, UserDefaults, String) {
+    private func fixture() async throws -> LibraryModel {
         HistoryProtocol.paths.withLock { $0 = [] }
         HistoryProtocol.missing.withLock { $0 = false }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [HistoryProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentHistoryTests.\(UUID().uuidString)"
-        let preferences = UserDefaults(suiteName: suite)!
-        let model = LibraryModel(client: client, preferences: preferences)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         try await model.service.connect()
-        return (model, preferences, suite)
+        return model
     }
 
     private func settled(_ model: LibraryModel) async throws {

@@ -8,7 +8,6 @@ import Testing
 struct GalleryLifecycleTests {
     @MainActor private struct Gallery {
         let model: LibraryModel
-        let suite: String
         let window: NSWindow
         let host: NSHostingView<MasonryGallery>
         let scroll: NSScrollView
@@ -20,7 +19,6 @@ struct GalleryLifecycleTests {
             collection.delegate = nil
             collection.dataSource = nil
             model.shutdownService()
-            model.preferences.removePersistentDomain(forName: suite)
             window.close()
         }
     }
@@ -86,9 +84,8 @@ struct GalleryLifecycleTests {
         // NSCollectionView installs its real scroll observers only in a window.
         // This owned test window is never ordered on screen; app activation is prohibited.
         NSApplication.shared.setActivationPolicy(.prohibited)
-        let suite = "LatentGalleryLifecycleTests.\(UUID().uuidString)"
         let client = try LibraryClient(baseURL: URL(string: "http://127.0.0.1:1")!)
-        let model = LibraryModel(client: client, preferences: UserDefaults(suiteName: suite)!)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         model.source = .starred
         model.photos = try (Array(3...251) + [1]).map { try photo($0) }
         model.total = 251
@@ -99,7 +96,6 @@ struct GalleryLifecycleTests {
         defer {
             if !returnedGallery {
                 model.shutdownService()
-                model.preferences.removePersistentDomain(forName: suite)
                 window.close()
             }
         }
@@ -111,7 +107,7 @@ struct GalleryLifecycleTests {
         }
         let collection = try #require(descendants(host).compactMap { $0 as? PhotoCollectionView }.first)
         let scroll = try #require(collection.enclosingScrollView)
-        let gallery = Gallery(model: model, suite: suite, window: window, host: host,
+        let gallery = Gallery(model: model, window: window, host: host,
                               scroll: scroll, collection: collection)
         try await settle(gallery)
         #expect(collection.numberOfItems(inSection: 0) == 250)

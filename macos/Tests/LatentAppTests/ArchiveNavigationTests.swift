@@ -51,8 +51,8 @@ private final class ArchiveProtocol: URLProtocol, @unchecked Sendable {
 @MainActor @Suite(.serialized)
 struct ArchiveNavigationTests {
     @Test func importFiltersAndPagingStayInsideTheReviewedBatch() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         let source = GallerySource.importBatch(id: "batch-fixture", name: "r2 + r5")
         model.navigate(to: source)
         try await waitUntil { !model.isLoading }
@@ -67,8 +67,8 @@ struct ArchiveNavigationTests {
     }
 
     @Test func combinedFiltersSurvivePagingAndTimelineNavigationClearsThem() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         let filters = PhotoFilters(dateFrom: "2026-01-01", dateTo: "2026-12-31", ratingMin: 4, flag: "pick")
         model.applySearchFilters(filters)
         try await waitUntil { !model.isLoading }
@@ -84,8 +84,8 @@ struct ArchiveNavigationTests {
     }
 
     @Test func smartSequencePagingUsesSavedFiltersInsteadOfUnfilteredLibrary() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         model.navigate(to: .sequence(id: "smart"))
         try await waitUntil { !model.isLoading }
         #expect(model.subtitle == "1 of 2 photos")
@@ -98,8 +98,8 @@ struct ArchiveNavigationTests {
     }
 
     @Test func timeLapseCollapseIsOptInAndNeverLeaksIntoSmartSequencePaging() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         #expect(ArchiveProtocol.queries.withLock { $0.last?["collapse_timelapses"] } == nil)
         model.setCollapseTimelapses(true)
         try await waitUntil { !model.isLoading }
@@ -109,9 +109,9 @@ struct ArchiveNavigationTests {
         try await waitUntil { !model.isLoading }
         await model.loadMore()?.value
         #expect(ArchiveProtocol.queries.withLock { $0.last?["collapse_timelapses"] } == nil)
-        #expect(preferences.bool(forKey: "collapseTimelapses.archive-fixture"))
+        #expect(model.preferences.bool(forKey: "collapseTimelapses.archive-fixture"))
         model.shutdownService()
-        let restored = LibraryModel(client: model.client, preferences: preferences)
+        let restored = LibraryModel(client: model.client, preferences: model.preferences)
         defer { restored.shutdownService() }
         await restored.start()
         try await waitUntil { !restored.isLoading }
@@ -120,8 +120,8 @@ struct ArchiveNavigationTests {
     }
 
     @Test func timeLapseExpansionPagesAllFramesAndReturnsToItsTimelineScope() async throws {
-        let (model, preferences, suite) = try await fixture()
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        let model = try await fixture()
+        defer { model.shutdownService() }
         model.navigate(to: .library(date: "2026-01"))
         try await waitUntil { !model.isLoading }
         model.setCollapseTimelapses(true)
@@ -141,17 +141,15 @@ struct ArchiveNavigationTests {
         #expect(model.source == .library(date: "2026-01"))
     }
 
-    private func fixture() async throws -> (LibraryModel, UserDefaults, String) {
+    private func fixture() async throws -> LibraryModel {
         ArchiveProtocol.queries.withLock { $0 = [] }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ArchiveProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentFilterTests.\(UUID().uuidString)"
-        let preferences = UserDefaults(suiteName: suite)!
-        let model = LibraryModel(client: client, preferences: preferences)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         await model.start()
         try await waitUntil { !model.isLoading }
-        return (model, preferences, suite)
+        return model
     }
 
     @Test(arguments: ["2026", "2026-01"])
@@ -160,10 +158,9 @@ struct ArchiveNavigationTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ArchiveProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let suite = "LatentArchiveNavigationTests.\(UUID().uuidString)"
-        let preferences = UserDefaults(suiteName: suite)!
+        let preferences = MemoryPreferences()
         let model = LibraryModel(client: client, preferences: preferences)
-        defer { model.shutdownService(); preferences.removePersistentDomain(forName: suite) }
+        defer { model.shutdownService() }
         await model.start()
         try await waitUntil { !model.isLoading }
         model.navigate(to: .library(date: period))

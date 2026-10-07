@@ -131,7 +131,7 @@ struct StarredMutationTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StarredProtocol.self]
         let client = try LibraryClient(baseURL: URL(string: "http://localhost:8766")!, session: URLSession(configuration: configuration))
-        let model = LibraryModel(client: client, preferences: UserDefaults(suiteName: "LatentStarredTests.\(UUID().uuidString)")!)
+        let model = LibraryModel(client: client, preferences: MemoryPreferences())
         do {
             try await model.service.connect()
             model.navigate(to: .starred)
