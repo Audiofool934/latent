@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 import threading
@@ -40,7 +41,15 @@ from .embeddings import (
     load_embedding_assets,
 )
 from .errors import ConfigurationError, EmbeddingServiceError, LatentError
-from .gemini import GEMINI_STORE_NAME, MAX_BATCH_SIZE, GeminiEmbeddingEncoder
+from .gemini import (
+    GEMINI_STORE_NAME,
+    KEYCHAIN_SERVICE,
+    MAX_BATCH_SIZE,
+    GeminiEmbeddingEncoder,
+    credential_source,
+    delete_keychain_key,
+    store_keychain_key,
+)
 from .jobs import ArchiveTreeScanner, DirectoryImporter, PreviewWorker
 from .jpeg_backfill import enqueue_jpeg_plan, plan_jpeg_backfill
 from .preview import MIB, ExifToolProbe, PreviewPipeline
@@ -296,6 +305,20 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
         command.add_argument("--embedding-dir", type=Path)
         command.add_argument("--json", action="store_true")
+
+    gemini_key = subparsers.add_parser(
+        "gemini-key", help="store the Gemini API key in the login Keychain"
+    )
+    key_commands = gemini_key.add_subparsers(dest="key_command", required=True)
+    key_commands.add_parser(
+        "set", help="save a key; prompts without echo, or reads one line from stdin"
+    ).set_defaults(handler=_run_gemini_key_set)
+    key_commands.add_parser(
+        "status", help="show where the key comes from, without printing it"
+    ).set_defaults(handler=_run_gemini_key_status)
+    key_commands.add_parser("delete", help="remove the key from the Keychain").set_defaults(
+        handler=_run_gemini_key_delete
+    )
 
     backend = subparsers.add_parser(
         "search-backend", help="show or explicitly switch the engine used for search"
@@ -996,6 +1019,34 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.2f} {unit}"
         amount /= 1024
     raise AssertionError("unreachable")
+
+
+def _run_gemini_key_set(args: argparse.Namespace) -> int:
+    key = getpass.getpass("Gemini API key: ") if sys.stdin.isatty() else sys.stdin.readline()
+    try:
+        store_keychain_key(key)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from error
+    print(f"Saved to the login Keychain as \"{KEYCHAIN_SERVICE}\".")
+    if credential_source() == "environment":
+        print("GEMINI_API_KEY or GOOGLE_API_KEY in this environment still takes precedence.")
+    return 0
+
+
+def _run_gemini_key_status(args: argparse.Namespace) -> int:
+    source = credential_source()
+    print({
+        "environment": "Gemini API key: from GEMINI_API_KEY or GOOGLE_API_KEY",
+        "keychain": f"Gemini API key: from the login Keychain (\"{KEYCHAIN_SERVICE}\")",
+        None: "Gemini API key: not configured",
+    }[source])
+    return 0 if source else 1
+
+
+def _run_gemini_key_delete(args: argparse.Namespace) -> int:
+    removed = delete_keychain_key()
+    print("Removed the key from the login Keychain." if removed else "No key was in the Keychain.")
+    return 0
 
 
 def _add_backend_argument(parser: argparse.ArgumentParser) -> None:

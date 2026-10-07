@@ -23,6 +23,8 @@ public struct SearchEngine: Decodable, Identifiable, Sendable {
     public let available: Bool
     public let availability: String?
     public let index: SearchEngineIndex
+    /// Where the service finds the Gemini key: "environment", "keychain", or nil. Never the key.
+    public let credentialSource: String?
     public let runtime: SearchEngineRuntime?
     public let validation: SearchEngineValidation?
     public var id: String { key }

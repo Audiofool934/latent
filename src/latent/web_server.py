@@ -46,7 +46,13 @@ from .embeddinggemma import (
 )
 from .errors import ConfigurationError
 from .filters import matching_ids, photo_filters
-from .gemini import GEMINI_STORE_NAME, GeminiEmbeddingEncoder
+from .gemini import (
+    GEMINI_STORE_NAME,
+    GeminiEmbeddingEncoder,
+    credential_source,
+    delete_keychain_key,
+    store_keychain_key,
+)
 from .imports import ImportManager
 from .ingest import FolderIndexer
 from .locations import LocationsStore
@@ -261,6 +267,9 @@ class LibraryServer(ThreadingHTTPServer):
                 entry.update(available=True, availability=None)
             except ConfigurationError as error:
                 entry.update(available=False, availability=str(error))
+            if key == GEMINI:
+                # Reports where the key comes from; the key itself is never returned.
+                entry["credential_source"] = credential_source()
             if key == EMBEDDINGGEMMA:
                 config = load_runtime_config(self.embeddings_root) if entry["available"] else None
                 entry["runtime"] = {
@@ -394,7 +403,7 @@ class LibraryServer(ThreadingHTTPServer):
 
 def _gemini_preflight() -> None:
     if not GeminiEmbeddingEncoder.credentials_available():
-        raise ConfigurationError("Configure a Gemini API key before generating photo embeddings")
+        raise ConfigurationError("Add a Gemini API key before using Gemini search")
 
 
 class LibraryRequestHandler(BaseHTTPRequestHandler):
@@ -607,6 +616,18 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._validate_workspace_identity(payload)
                 self._send_json({"validation": self.server.start_validation(match.group(1))})
+            elif method in {"POST", "DELETE"} and parsed.path == "/api/gemini-key":
+                payload = self._read_json_body()
+                fields = {"expected_data_id", "key"} if method == "POST" else {"expected_data_id"}
+                _validate_json_keys(payload, allowed=fields, required=fields)
+                self._validate_workspace_identity(payload)
+                if method == "POST":
+                    if not isinstance(payload["key"], str):
+                        raise ValueError("key must be a string")
+                    store_keychain_key(payload["key"])
+                else:
+                    delete_keychain_key()
+                self._send_json(self.server.search_backends())
             elif method == "POST" and parsed.path == "/api/search-backends/activate":
                 payload = self._read_json_body()
                 _validate_json_keys(

@@ -26,7 +26,11 @@ Image and text occupy the same Content to produce a single query vector; multimo
 The most recent 32 image-query vectors are cached by image digest and text for the server lifetime; uploaded image bytes are not retained in the cache.
 Changing sort order reuses this vector, while changing the reference image or refining its text requires a new embedding.
 
-The API key is read lazily from `GEMINI_API_KEY`, with `GOOGLE_API_KEY` as a fallback.
+The API key is read lazily from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the login Keychain item "Latent Gemini API key".
+Apps opened from the Dock do not inherit a shell environment, so the Keychain is the normal place for the key.
+**AI Search > Add API Key…** in the app and `latent gemini-key set` both save it through `/usr/bin/security`, passing the key on stdin rather than as an argument.
+Because only that tool creates and reads the item, the service reads it without a permission prompt; a lookup is cached for 60 seconds.
+The local service reports only where the key comes from, never the key itself.
 No command-line key argument is accepted, and keys and provider response bodies are excluded from logs and errors.
 Requests use HTTPS to Google's fixed endpoint and do not follow redirects.
 Library browsing, stored-vector similarity, and Curator do not require an API key or network access.

@@ -44,8 +44,8 @@ uv run latent serve --port 8766
 open var/native/Latent.app --args --server-url http://127.0.0.1:8766
 ```
 
-Semantic search requires the server process to receive `GEMINI_API_KEY` or `GOOGLE_API_KEY` through its environment.
-The native app never reads or stores that key.
+Gemini search needs an API key, which **AI Search > Add API Key…** saves in the login Keychain through the local service.
+The app sends the key to the service once and never stores or displays it; `GEMINI_API_KEY` in the service environment still takes precedence.
 Browsing dates, loading cached previews, similarity search, and Sequence editing use the local service.
 A new semantic query uses the server's existing Gemini query embedding path.
 

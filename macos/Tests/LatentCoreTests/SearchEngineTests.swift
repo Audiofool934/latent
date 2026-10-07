@@ -10,7 +10,7 @@ private let enginesJSON = """
   "image_text_queries":true,"requires_validation":false,"image_cost_usd":0.00012,"images_per_second":null,
   "active":true,"index":{"queued_assets":3,"indexed_assets":3,"stale_jobs":0,
   "jobs":{"pending":0,"running":0,"succeeded":3,"failed":0},"total_assets":3,"remaining_assets":0,
-  "phase":"complete","semantic_ready":true},"available":true,"availability":null},
+  "phase":"complete","semantic_ready":true},"available":true,"availability":null,"credential_source":"keychain"},
  {"key":"embeddinggemma","display_name":"EmbeddingGemma 2 (on this Mac)","model_id":"embeddinggemma-2",
   "dimensions":768,"space_id":"embeddinggemma-2@c5d0e65afc34799f","provider":"local_llama_cpp","local":true,
   "sends_previews":false,"image_text_queries":false,"requires_validation":true,"image_cost_usd":0.0,
@@ -97,7 +97,8 @@ private final class EngineStub: URLProtocol, @unchecked Sendable {
                 data.append(buffer, count: count)
             }
             stream.close()
-            Self.bodies[url.path] = (try? JSONSerialization.jsonObject(with: data) as? [String: String]) ?? [:]
+            Self.bodies["\(request.httpMethod ?? "GET") \(url.path)"] =
+                (try? JSONSerialization.jsonObject(with: data) as? [String: String]) ?? [:]
         }
         let body = url.path.hasSuffix("/validate") ? "{\"validation\":{\"status\":\"running\"}}" : enginesJSON
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -108,21 +109,40 @@ private final class EngineStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@Test func engineActionsSendTheReviewedValidationAndLibraryIdentity() async throws {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [EngineStub.self]
-    let client = try LibraryClient(baseURL: URL(string: "http://127.0.0.1:8766")!,
-                                   session: URLSession(configuration: configuration))
-    let list = try await client.searchEngines()
-    let local = try #require(list.backends.first { $0.key == "embeddinggemma" })
-    try await client.validateSearchEngine(local.key, dataID: "library-1")
-    _ = try await client.activateSearchEngine(local, dataID: "library-1")
-    _ = try? await client.prepareEmbeddings(id: "r", scope: "all", ids: nil, importID: nil,
-                                            backend: "embeddinggemma", dataID: "library-1")
-    #expect(EngineStub.bodies["/api/search-backends/embeddinggemma/validate"] == ["expected_data_id": "library-1"])
-    #expect(EngineStub.bodies["/api/search-backends/activate"] == [
-        "backend": "embeddinggemma", "validation_id": "5219dd61-95ec-4867-af99-76ff6a60eb09",
-        "expected_data_id": "library-1",
-    ])
-    #expect(EngineStub.bodies["/api/embedding-runs"]?["backend"] == "embeddinggemma")
+// Both tests record requests in EngineStub's shared state, so they run one at a time.
+@Suite(.serialized) struct EngineClientTests {
+    @Test func engineActionsSendTheReviewedValidationAndLibraryIdentity() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [EngineStub.self]
+        let client = try LibraryClient(baseURL: URL(string: "http://127.0.0.1:8766")!,
+                                       session: URLSession(configuration: configuration))
+        let list = try await client.searchEngines()
+        let local = try #require(list.backends.first { $0.key == "embeddinggemma" })
+        try await client.validateSearchEngine(local.key, dataID: "library-1")
+        _ = try await client.activateSearchEngine(local, dataID: "library-1")
+        _ = try? await client.prepareEmbeddings(id: "r", scope: "all", ids: nil, importID: nil,
+                                                backend: "embeddinggemma", dataID: "library-1")
+        #expect(EngineStub.bodies["POST /api/search-backends/embeddinggemma/validate"] == ["expected_data_id": "library-1"])
+        #expect(EngineStub.bodies["POST /api/search-backends/activate"] == [
+            "backend": "embeddinggemma", "validation_id": "5219dd61-95ec-4867-af99-76ff6a60eb09",
+            "expected_data_id": "library-1",
+        ])
+        #expect(EngineStub.bodies["POST /api/embedding-runs"]?["backend"] == "embeddinggemma")
+    }
+
+    @Test func geminiKeyIsSentOnlyInTheRequestBodyAndNeverDecoded() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [EngineStub.self]
+        let client = try LibraryClient(baseURL: URL(string: "http://127.0.0.1:8766")!,
+                                       session: URLSession(configuration: configuration))
+        let saved = try await client.saveGeminiKey("AIzaFakeKeyForTests_0123456789", dataID: "library-1")
+        #expect(saved.backends.first { $0.key == "gemini" }?.credentialSource == "keychain")
+        #expect(EngineStub.bodies["POST /api/gemini-key"] == [
+            "key": "AIzaFakeKeyForTests_0123456789", "expected_data_id": "library-1",
+        ])
+        _ = try await client.removeGeminiKey(dataID: "library-1")
+        #expect(EngineStub.bodies["DELETE /api/gemini-key"] == ["expected_data_id": "library-1"])
+        let local = try #require(saved.backends.first { $0.key == "embeddinggemma" })
+        #expect(local.credentialSource == nil)
+    }
 }

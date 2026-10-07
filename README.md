@@ -54,7 +54,8 @@ What leaves your Mac depends on the search engine:
 
 Building an index always starts with a review of the photo count, and for Gemini the upload size and estimated cost.
 Imports never start it automatically.
-API keys are read from the environment and are never written to disk, databases, or logs.
+The Gemini API key is kept in your login Keychain or read from the environment.
+Latent never writes it to its own files, databases, or logs, and never returns it from the local service.
 
 ## Requirements
 
@@ -95,15 +96,10 @@ Then, in the app:
 
 ### Gemini search
 
-The search service must have `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in its environment.
-An app opened from the Dock or Finder does not inherit your shell environment.
-Until Latent can read the key from the Keychain, quit Latent, start the service from a terminal, and point the app at it:
-
-```bash
-export GEMINI_API_KEY=your-key
-uv run latent serve --port 8766
-open var/native/Latent.app --args --server-url http://127.0.0.1:8766
-```
+In **AI Search**, choose **Add API Key…** on the Gemini row and paste your key.
+Latent saves it in your login Keychain, so it works when you open the app from the Dock.
+From a terminal, `uv run latent gemini-key set` does the same, and `gemini-key status` shows where the key comes from.
+`GEMINI_API_KEY` or `GOOGLE_API_KEY` in the service environment takes precedence over the Keychain.
 
 ### On-device search
 
@@ -129,6 +125,7 @@ Run `uv run latent --help` for every command and option.
 | `scan-tree`, `scan`, `work` | Catalog a CloudDrive archive and build previews in a resumable queue |
 | `embedding-build`, `embedding-status` | Build and inspect a search index |
 | `local-encoder`, `search-backend` | Set up on-device search and switch engines |
+| `gemini-key` | Save, check, or remove the Gemini API key in the login Keychain |
 | `timelapse-audit`, `scan-jpeg` | Find interval-shooting candidates and plan missing JPEG additions |
 | `workspace-export`, `workspace-import` | Back up and merge ratings, captions, and Sequences |
 
@@ -173,7 +170,6 @@ LATENT_TEST_PYTHON="$PWD/.venv/bin/python" scripts/test-macos.sh
 ## Limitations
 
 - Latent is not packaged or notarized, and the app depends on the checkout's Python environment.
-- Apps opened from the Dock cannot read a Gemini key from the environment yet.
 - Cloud archives are supported through CloudDrive2 only.
 - Most testing used Sony ARW files.
 - Adding words to a reference image search is not available with on-device search yet.

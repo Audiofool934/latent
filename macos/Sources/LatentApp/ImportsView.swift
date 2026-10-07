@@ -76,6 +76,25 @@ extension LibraryModel {
         }
     }
 
+    func saveGeminiKey(_ key: String) async throws {
+        guard workflowWritable, let dataID = workflowDataID else {
+            throw ServiceConnectionError("Reconnect to Latent before saving the key.")
+        }
+        let engines = try await client.saveGeminiKey(key, dataID: dataID)
+        guard engines.dataId == dataID, service.identity?.dataId == dataID else { return }
+        searchEngines = engines
+        await refreshCatalogSummary()
+    }
+
+    func removeGeminiKey() {
+        guard workflowWritable, let dataID = workflowDataID else { return }
+        performWorkflow(dataID: dataID) {
+            let engines = try await self.client.removeGeminiKey(dataID: dataID)
+            guard engines.dataId == dataID, self.service.identity?.dataId == dataID else { return }
+            self.searchEngines = engines
+        }
+    }
+
     func chooseImportFolders() {
         guard workflowWritable, !importActive, let dataID = workflowDataID else { return }
         let panel = NSOpenPanel()
@@ -160,6 +179,8 @@ struct ImportsView: View {
     @State private var archiveReview: PhotoImport?
     @State private var embeddingScope = "incremental"
     @State private var chosenEngine: String?
+    @State private var editingGeminiKey = false
+    @State private var confirmingKeyRemoval = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -189,6 +210,12 @@ struct ImportsView: View {
         .task { await model.refreshImports() }
         .sheet(item: $archiveReview) { batch in archiveConfirmation(batch) }
         .sheet(item: $model.embeddingReview) { run in EmbeddingConfirmation(model: model, run: run) }
+        .sheet(isPresented: $editingGeminiKey) { GeminiKeySheet(model: model) }
+        .confirmationDialog("Remove the Gemini API key from your login Keychain?", isPresented: $confirmingKeyRemoval) {
+            Button("Remove Key", role: .destructive) { model.removeGeminiKey() }
+        } message: {
+            Text("Gemini search and indexing stop working until you add a key again.")
+        }
     }
 
     private var imports: some View {
@@ -375,7 +402,10 @@ struct ImportsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if let problem = engine.availability {
                 Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-            } else if engine.local {
+            }
+            if engine.key == "gemini" {
+                geminiKeyControls(engine)
+            } else if engine.local, engine.availability == nil {
                 if let runtime = engine.runtime {
                     Text("Model: \(runtime.label)").font(.caption).foregroundStyle(.secondary)
                     if let error = runtime.error {
@@ -420,6 +450,23 @@ struct ImportsView: View {
                 }.controlSize(.small).padding(.top, 2)
             }
         }.padding(.vertical, 4)
+    }
+
+    private func geminiKeyControls(_ engine: SearchEngine) -> some View {
+        HStack(spacing: 10) {
+            switch engine.credentialSource {
+            case "environment":
+                Text("API key from the service environment").font(.caption).foregroundStyle(.secondary)
+            case "keychain":
+                Text("API key saved in your login Keychain").font(.caption).foregroundStyle(.secondary)
+                Button("Change Key…") { editingGeminiKey = true }
+                Button("Remove Key") { confirmingKeyRemoval = true }
+            default:
+                Button("Add API Key…") { editingGeminiKey = true }
+            }
+        }
+        .controlSize(.small)
+        .disabled(!model.workflowWritable)
     }
 
     private var embeddings: some View {
@@ -485,6 +532,54 @@ struct ImportsView: View {
     }
 
     private func bytes(_ value: Int64) -> String { ByteCountFormatter.string(fromByteCount: value, countStyle: .file) }
+}
+
+struct GeminiKeySheet: View {
+    @Bindable var model: LibraryModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var key = ""
+    @State private var saving = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Gemini API Key").font(.title2.bold())
+            Text("Latent saves the key in your login Keychain. It is sent only to the Gemini API, with indexing and search requests.")
+                .font(.callout).foregroundStyle(.secondary)
+            SecureField("Paste your API key", text: $key)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            Link("Get a key in Google AI Studio", destination: URL(string: "https://aistudio.google.com/apikey")!)
+                .font(.callout)
+            if let error { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                if saving { ProgressView().controlSize(.small) }
+                Button("Save") { save() }
+                    .buttonStyle(.glassProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
+            }
+        }.padding(28).frame(width: 480)
+    }
+
+    private func save() {
+        guard !saving, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        saving = true
+        error = nil
+        let value = key
+        Task {
+            defer { saving = false }
+            do {
+                try await model.saveGeminiKey(value)
+                key = ""
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
 }
 
 private struct EmbeddingConfirmation: View {

@@ -154,6 +154,17 @@ public final class LibraryClient: Sendable {
                                          body: Body(expected_data_id: dataID))
     }
 
+    /// The service stores the key in the login Keychain; responses never include it.
+    public func saveGeminiKey(_ key: String, dataID: String) async throws -> SearchEngineList {
+        struct Body: Encodable, Sendable { let key: String; let expected_data_id: String }
+        return try await send("api/gemini-key", method: "POST", body: Body(key: key, expected_data_id: dataID))
+    }
+
+    public func removeGeminiKey(dataID: String) async throws -> SearchEngineList {
+        struct Body: Encodable, Sendable { let expected_data_id: String }
+        return try await send("api/gemini-key", method: "DELETE", body: Body(expected_data_id: dataID))
+    }
+
     public func activateSearchEngine(_ engine: SearchEngine, dataID: String) async throws -> SearchEngineList {
         struct Body: Encodable, Sendable { let backend: String; let validation_id: String?; let expected_data_id: String }
         return try await send("api/search-backends/activate", method: "POST",

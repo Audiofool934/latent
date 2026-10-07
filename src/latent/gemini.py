@@ -8,6 +8,8 @@ import io
 import json
 import math
 import os
+import re
+import subprocess
 import threading
 import time
 from collections import OrderedDict
@@ -30,6 +32,94 @@ _ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MO
 _MAX_IMAGE_BYTES = 1024 * 1024
 _MAX_BODY_BYTES = 20 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+# Apps opened from the Dock do not inherit a shell environment, so the key can also live in
+# the login Keychain. Only /usr/bin/security creates and reads the item, which keeps its
+# access list on that one tool and avoids permission prompts for the service.
+KEYCHAIN_SERVICE = "Latent Gemini API key"
+KEYCHAIN_ACCOUNT = "gemini"
+_SECURITY = "/usr/bin/security"
+_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{20,200}$")
+_KEYCHAIN_TTL_SECONDS = 60
+_keychain_lock = threading.Lock()
+_keychain_cache: dict[str, Any] = {"value": None, "checked": None}
+MISSING_KEY_MESSAGE = (
+    "Add a Gemini API key in AI Search, or run `latent gemini-key set`. "
+    "GEMINI_API_KEY in the service environment also works"
+)
+
+
+def api_key() -> str | None:
+    """The environment wins; otherwise use the login Keychain item, if any."""
+    return _environment_key() or _keychain_key()
+
+
+def credential_source() -> str | None:
+    if _environment_key():
+        return "environment"
+    return "keychain" if _keychain_key() else None
+
+
+def store_keychain_key(key: str) -> None:
+    """Save the key without placing it in any process's arguments."""
+    key = key.strip()
+    if not _KEY_PATTERN.fullmatch(key):
+        raise ValueError("That does not look like a Gemini API key")
+    command = (
+        f'add-generic-password -U -s "{KEYCHAIN_SERVICE}" -a "{KEYCHAIN_ACCOUNT}" '
+        f'-l "{KEYCHAIN_SERVICE}" -w "{key}"\n'
+    )
+    # `security -i` reads commands from stdin, so the key never appears in argv.
+    result = _run_security(["-i"], stdin=command)
+    if result.returncode != 0 or result.stdout.strip() or result.stderr.strip():
+        raise EmbeddingServiceError(
+            "The login Keychain did not save the key. Unlock it and try again"
+        )
+    _forget_keychain_key()
+    if _keychain_key() != key:
+        raise EmbeddingServiceError("The login Keychain did not return the saved key")
+
+
+def delete_keychain_key() -> bool:
+    result = _run_security(
+        ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT]
+    )
+    _forget_keychain_key()
+    if result.returncode not in (0, 44):  # 44: the item does not exist
+        raise EmbeddingServiceError("The login Keychain did not remove the key")
+    return result.returncode == 0
+
+
+def _environment_key() -> str | None:
+    value = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    return value.strip() or None
+
+
+def _keychain_key() -> str | None:
+    with _keychain_lock:
+        checked = _keychain_cache["checked"]
+        if checked is not None and time.monotonic() - checked < _KEYCHAIN_TTL_SECONDS:
+            return _keychain_cache["value"]
+        result = _run_security(
+            ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"]
+        )
+        value = result.stdout.strip() if result.returncode == 0 else ""
+        _keychain_cache.update(value=value or None, checked=time.monotonic())
+        return _keychain_cache["value"]
+
+
+def _forget_keychain_key() -> None:
+    with _keychain_lock:
+        _keychain_cache.update(value=None, checked=None)
+
+
+def _run_security(arguments: list[str], *, stdin: str | None = None):
+    try:
+        return subprocess.run(
+            [_SECURITY, *arguments], input=stdin, capture_output=True, text=True, timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(arguments, 1, "", "security unavailable")
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -59,9 +149,7 @@ class GeminiEmbeddingEncoder:
 
     @staticmethod
     def credentials_available() -> bool:
-        return bool(
-            (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-        )
+        return api_key() is not None
 
     def encode_images(self, paths: Sequence[Path], batch_size: int) -> list[list[float]]:
         if not 1 <= batch_size <= MAX_BATCH_SIZE:
@@ -154,13 +242,9 @@ class GeminiEmbeddingEncoder:
         }
 
     def _embed(self, requests: list[dict[str, Any]], *, image_bytes: int = 0) -> list[list[float]]:
-        api_key = (
-            os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-        ).strip()
-        if not api_key:
-            raise EmbeddingServiceError(
-                "Set GEMINI_API_KEY (or GOOGLE_API_KEY) to use Gemini embeddings"
-            )
+        key = api_key()
+        if not key:
+            raise EmbeddingServiceError(MISSING_KEY_MESSAGE)
         body = json.dumps({"requests": requests}, separators=(",", ":")).encode()
         if len(body) > _MAX_BODY_BYTES:
             raise ValueError("Gemini request exceeds 20 MiB; reduce --batch-size")
@@ -169,7 +253,7 @@ class GeminiEmbeddingEncoder:
             request = Request(
                 _ENDPOINT + ":batchEmbedContents",
                 data=body,
-                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
                 method="POST",
             )
             self.api_requests += 1
