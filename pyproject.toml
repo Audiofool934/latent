@@ -5,14 +5,19 @@ build-backend = "hatchling.build"
 [project]
 name = "latent-photo"
 version = "0.1.1"
-description = "Read-only photographic archive indexing and preview spike"
+description = "A macOS workspace for browsing, searching, and curating a large personal photo archive"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "clouddrive2-client==0.3.0",
   "numpy>=2.4,<3",
   "pillow>=11.3,<13",
 ]
+
+[project.urls]
+Repository = "https://github.com/Audiofool934/latent"
 
 [project.scripts]
 latent = "latent.cli:main"
@@ -22,7 +27,6 @@ dev = [
   "pytest>=8.4,<9",
   "ruff>=0.12,<1",
 ]
-
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latent"]

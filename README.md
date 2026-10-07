@@ -1,248 +1,183 @@
 # Latent
 
-> A personal photographic operating system for rediscovery, curation, and new work.
+A personal photographic workspace for rediscovery, curation, and new work.
 
-Latent 是一个面向个人摄影档案的 macOS-first 桌面应用。
-它让沉睡在网络存储中的照片重新变得可浏览、可理解、可组织，并最终形成新的作品。
+Latent is a macOS app for photographers with a large archive of RAW and JPEG files.
+It builds a fast local index of previews and metadata, so you can browse the whole archive without downloading originals.
+You can search photos by meaning, find related pictures across years, grade and caption them, and arrange selections into Sequences.
+Originals stay where they are: on a local disk, an external drive, or a mounted cloud drive.
 
-项目当前已完成 Phase 0，并进入 Phase 1 的 Library slice。
-Python 数据层已经跑通 CloudDrive 只读元数据、HTTP Range、ARW 内嵌预览、SQLite 索引、分层缓存、可恢复目录树扫描和预览任务队列。
-桌面 GUI 已确定采用 SwiftUI + AppKit，首个原生 macOS 客户端已接入现有本地 Python 服务。
-原生图库采用保留照片完整比例的 masonry 排布、明确标注的侧栏、常显文件名与日期，以及底部照片详情。
-macOS 26 的原生材质与圆角仅用于导航和操作区域，让照片保持视觉主体。
-构建、运行、性能测量与已验证范围见 [native macOS client](docs/native-macos.md)。
-首轮真实全库任务已经为 25,793 张 ARW 生成 contact preview，当前队列没有 pending、running 或 failed 项。
-高容量日期按 250 张一批增量加载，不受单页上限影响。
-图片和文字 embedding 已全面切换到 Gemini Embedding 2 API，默认使用 3,072 维向量。
-API 图片编码只上传已有的 512 px contact JPEG，文字搜索只发送查询文字；向量、排序和聚类继续保存在本地。
-语义搜索提供可选的 `More variety`，在保留最佳匹配的同时降低相似连拍在前排结果中的占比；关闭后恢复原始相关度排序。
-Grounded Curator 已能解释单图视觉邻域，并生成无标签的全库视觉 motif、跨年份证据和 Sequence seed，不生成地点、身份或故事。
-独立 writable workspace 已具备持久化 Sequence、星级、caption、稳定档案引用和非覆盖式导入导出契约。
-原生客户端支持自选图库输入和成片输出目录、本地磁盘或网盘挂载、多选编辑批次、PhotoLab 10 交接，以及按原始目录保存勾选成片。
-Locations 还可将多层 Sequence 导出为指向原片的软链接目录，不复制照片。
-使用流程和验证边界见 [archived-photo editing](docs/archived-photo-editing.md)。
-旧 CloudDrive 图库遗漏的独立 JPEG 可用 [JPEG 补入流程](docs/jpeg-backfill.md) 增量加入，通过云端预览和有界 EXIF 读取避免整张下载原片。
-全库 Gemini 索引已于 2026-10-01 核验完成：25,793 张照片全部具有有效向量，没有待处理、运行中或失败的任务。
-索引支持增量构建和断点续跑，Library 页面每 10 秒更新可搜索照片数量与索引状态。
-只有覆盖全部照片时，搜索框才显示 “Search all photos”。
-当前运行信息与接续入口见 [project status](docs/project-status.md)，命令行可用 `latent embedding-status` 查看实时队列。
+> **Status: developer preview.**
+> Latent runs from a source checkout on Apple Silicon Macs with macOS 26.
+> There is no packaged download yet.
 
-## Phase 0 spike
+## Features
 
-Phase 0 验证底层数据链路，当前 SwiftUI + AppKit 界面通过本地 HTTP 契约复用 Python 数据服务。
-CloudDrive 适配器与预览管线保持隔离，图库浏览只读取已经生成的本地缓存。
+- **Archive browsing.**
+  A photo-first masonry gallery and a year, month, and day timeline, tested with more than 40,000 photos.
+  Browsing reads only local previews and never moves, renames, or rewrites originals.
+- **Semantic search.**
+  Search by text in any language, or by a reference image.
+  Sort results by most similar, least similar, or more variety, and open similar photos from any picture.
+- **Two search engines.**
+  Use [Gemini Embedding 2](docs/gemini-embeddings.md) through the Gemini API, or [EmbeddingGemma 2](docs/local-embeddings.md) running on your Mac.
+  Each engine keeps its own index, and you switch between them explicitly.
+- **Review.**
+  Star ratings, pick and reject flags, captions, Starred photos, and filters by date, rating, Starred, and flag.
+  Keyboard shortcuts cover preview (Space), ratings (0-5), flags (Q and R), and navigation (W and E).
+- **Sequences.**
+  Ordered selections in nested folders, with drag and drop.
+  Sequences can be exported as folders of symbolic links to the originals.
+- **Imports.**
+  Add camera cards or folders and build previews for ARW, JPEG, HEIF/HIF, PNG, and TIFF.
+  Copy originals into an archive folder with verified checksums.
+- **Editing handoff.**
+  Prepare a batch for DxO PhotoLab and save finished photos next to their originals.
+- **Timelapse organizer.**
+  Find interval-shooting sequences from EXIF data and collapse them into one entry in the timeline.
+- **Curator.**
+  Explain why photos are related and discover visual motifs across years, grounded in stored embeddings and EXIF data.
+- **Recoverable changes.**
+  Trash with restore, a user workspace kept apart from the rebuildable index, and non-destructive workspace export and import.
 
-本机准备：
+## Privacy
 
-- CloudDrive 正在运行，且本地 Cloud API 可用
-- `exiftool`
-- `uv`
+Latent has no accounts and no telemetry.
+The catalog, previews, vectors, and your ratings, captions, and Sequences stay on your Mac.
+
+What leaves your Mac depends on the search engine:
+
+| Engine | Sent off the Mac |
+| --- | --- |
+| Gemini Embedding 2 | 512-pixel contact previews when you build the index, plus search text and reference images |
+| EmbeddingGemma 2 | Nothing |
+
+Building an index always starts with a review of the photo count, and for Gemini the upload size and estimated cost.
+Imports never start it automatically.
+API keys are read from the environment and are never written to disk, databases, or logs.
+
+## Requirements
+
+- An Apple Silicon Mac with macOS 26 or later.
+- Xcode or the Command Line Tools with Swift 6.2 or later.
+- Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
+- [ExifTool](https://exiftool.org) for photo metadata: `brew install exiftool`.
+
+Optional:
+
+- A [Gemini API key](https://ai.google.dev/gemini-api/docs/api-key) for Gemini search.
+- A llama.cpp build with EmbeddingGemma 2 support for on-device search; see [local search](docs/local-embeddings.md).
+- [CloudDrive2](https://www.clouddrive2.com) for archives on cloud storage.
+- DxO PhotoLab for the editing handoff.
+
+## Getting started
+
+Clone the repository, install the Python environment, and build the app:
+
+```bash
+git clone https://github.com/Audiofool934/latent.git
+cd latent
+uv sync
+scripts/build-macos.sh
+open var/native/Latent.app
+```
+
+The build script creates an ad hoc signed app at `var/native/Latent.app`.
+The app uses this checkout's Python environment, so rebuild it if you move the project.
+Opening the app starts a local service on `127.0.0.1:8766`, and quitting the app stops it.
+Latent keeps its data in `~/Library/Application Support/Latent/`.
+
+Then, in the app:
+
+1. Open **Imports** and choose **Add folders…** to add camera folders, then **Build previews**.
+2. Use **Locations** to connect existing archive folders or a mounted cloud drive.
+3. Open **AI Search** to choose a search engine and build its index.
+
+### Gemini search
+
+The search service must have `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in its environment.
+An app opened from the Dock or Finder does not inherit your shell environment.
+Until Latent can read the key from the Keychain, quit Latent, start the service from a terminal, and point the app at it:
+
+```bash
+export GEMINI_API_KEY=your-key
+uv run latent serve --port 8766
+open var/native/Latent.app --args --server-url http://127.0.0.1:8766
+```
+
+### On-device search
+
+EmbeddingGemma 2 needs no API key.
+Download the pinned model files, then point Latent at a compatible `llama-server`:
+
+```bash
+uv run latent local-encoder fetch --model-dir ~/Library/Application\ Support/Latent/models/embeddinggemma-2
+uv run latent local-encoder setup --llama-server /path/to/llama-server --model-dir ~/Library/Application\ Support/Latent/models/embeddinggemma-2
+```
+
+Then build, validate, and activate its index in **AI Search**.
+See [local search](docs/local-embeddings.md) for the llama.cpp requirement and the validation steps.
+
+## Command line
+
+The `latent` command manages the same data as the app.
+Run `uv run latent --help` for every command and option.
+
+| Command | Purpose |
+| --- | --- |
+| `serve` | Run the local service for the app and the web gallery |
+| `scan-tree`, `scan`, `work` | Catalog a CloudDrive archive and build previews in a resumable queue |
+| `embedding-build`, `embedding-status` | Build and inspect a search index |
+| `local-encoder`, `search-backend` | Set up on-device search and switch engines |
+| `timelapse-audit`, `scan-jpeg` | Find interval-shooting candidates and plan missing JPEG additions |
+| `workspace-export`, `workspace-import` | Back up and merge ratings, captions, and Sequences |
+
+## How it works
+
+Latent separates your data into three layers:
+
+1. **The archive.** Your originals and sidecars, which browsing and search only read.
+2. **A rebuildable index.** Metadata, contact and preview images, and search vectors in a local SQLite catalog and cache.
+   You can delete it and rebuild it from the archive.
+3. **The workspace.** Ratings, captions, flags, Sequences, imports, and search history, stored apart from the index.
+
+A Python service in `src/latent` owns all three layers.
+The native client in `macos/` is built with SwiftUI and AppKit and talks to the service over loopback HTTP.
+The same service also serves a browser gallery at `http://127.0.0.1:8766`.
+
+## Development
 
 ```bash
 uv sync
-uv run latent spike --path '/CloudName/path/to/photo.ARW'
-uv run latent scan --path '/CloudName/path/to/YYYY-MM-DD'
-uv run latent scan-tree --path '/CloudName/archive-root' --max-directories 25
-uv run latent scan-tree --scan-id 1 --max-directories 100
-uv run latent scan-tree-cancel --scan-id 1
-uv run latent work --max-jobs 25
-uv run latent status
-uv run latent embedding-status
-uv run latent embedding-sync
-uv run latent embedding-build --max-jobs 64 --batch-size 32 --progress
-uv run latent workspace-status
-uv run latent workspace-export --output ./latent-workspace.json
-uv run latent workspace-import --input ./latent-workspace.json
-uv run latent serve
 uv run pytest
+uv run ruff check .
+scripts/test-macos.sh
 ```
 
-图片索引和语义查询读取进程环境中的 `GEMINI_API_KEY`，也兼容 `GOOGLE_API_KEY`。
-密钥不写入项目、数据库、HTTP 响应或日志。
-当前环境不再安装 PyTorch、Transformers 或本地模型权重。
+To also test the native app starting, reusing, and stopping a real Python service, run:
 
-默认状态保存在 `~/Library/Application Support/Latent/phase0/`。
-CloudDrive device token 只从应用自己的本地 plist 读取到内存，不会写入项目、SQLite、缓存文件或命令输出。
-底层预览证据见 [Phase 0 results](docs/phase-0-results.md)。
-目录扫描和任务队列证据见 [Phase 1 library slice](docs/phase-1-library-slice.md)。
-当前 API 契约、费用和迁移记录见 [Gemini embeddings](docs/gemini-embeddings.md)。
-也可以改用在本机通过 llama.cpp 运行的 EmbeddingGemma 2，它使用独立索引，经验证后需显式切换，见 [local EmbeddingGemma 2 search](docs/local-embeddings.md)。
-退休本地模型的历史测量保留在 [embedding benchmark](docs/embedding-benchmark.md)。
-用户创作状态的持久化与交换契约见 [writable workspace](docs/writable-workspace.md)。
-`latent serve` 默认只监听 `127.0.0.1:8765`，日期浏览与相似照片只读取本地数据；自然语言搜索会请求 Gemini API 生成查询向量。
-新编辑流程只在明确操作时读取输入目录并写入选择的输出目录，保留原片层级，遇到不同内容的同名文件则另存版本。
-输入输出相同或输出包含输入时使用 `_Latent Edits`，扫描排除输出和工作副本目录。
-写入挂载目录后的云端同步由 CloudDrive2 负责，Latent 保留全部工作文件。
-已有 CloudDrive 图库可连接对应挂载目录并保留索引，旧回传批次继续支持原有的显式恢复和校验流程。
-`scan-tree` 默认跳过名称以 `.` 或 `_` 开头的辅助目录，避免把修复区、元数据和导出文件混入正常图库。
-只有明确传入 `--include-hidden` 才会遍历这些目录。
-`work` 在启动时按目录中的拍摄日期重新排列 pending job，较新的日期优先。
-连续五次 provider 失败会触发熔断，`Ctrl-C` 会把当前 job 安全放回 pending。
+```bash
+LATENT_TEST_PYTHON="$PWD/.venv/bin/python" scripts/test-macos.sh
+```
 
-## Why Latent
+## Documentation
 
-照片已经安全地进入长期档案，但“存下来”不等于“用起来”。
-当原始素材位于 aDrive 这类按需网络存储中，Finder Quick Look 的等待、跨年份目录的割裂，以及 RAW 文件的体积，会让回看与整理逐渐变得昂贵。
+- [Native macOS client](docs/native-macos.md): build, launch, service ownership, and validation.
+- [Imports](docs/import-workflow.md): previews, archive copies, and photo embeddings.
+- [Locations and editing](docs/archived-photo-editing.md): folders, PhotoLab handoff, and Trash.
+- [Gemini search](docs/gemini-embeddings.md) and [on-device search](docs/local-embeddings.md).
+- [Workspace format](docs/writable-workspace.md): Sequences, annotations, export, and import.
+- [Timelapse audit](docs/timelapse-audit.md) and [JPEG backfill](docs/jpeg-backfill.md).
+- Development history: [Phase 0](docs/phase-0-results.md), [Phase 1](docs/phase-1-library-slice.md), [encoder benchmark](docs/embedding-benchmark.md), and the original [product notes](docs/product-notes.zh-CN.md) (Chinese).
 
-Latent 解决的是档案被动沉睡的问题。
-名字同时指向暗房中尚未显影的 latent image，以及模型用来发现视觉关系的 latent space。
+## Limitations
 
-## Product thesis
+- Latent is not packaged or notarized, and the app depends on the checkout's Python environment.
+- Apps opened from the Dock cannot read a Gemini key from the environment yet.
+- Cloud archives are supported through CloudDrive2 only.
+- Most testing used Sony ARW files.
+- Adding words to a reference image search is not available with on-device search yet.
 
-Latent 不是另一个备份客户端、通用相册管理器或 RAW 编辑器。
-它是一层建立在可信摄影档案之上的个人工作空间：
+## License
 
-1. 快速看见整个档案，而不必先下载原片。
-2. 通过时间、地点、器材、视觉母题和自然语言重新发现照片。
-3. 让 AI 以策展人与研究伙伴的方式揭示有依据的联系。
-4. 把发现组织成 Sequence，并继续交给 DxO、Finder 或导出流程。
-
-## Experience
-
-当前原生主界面采用以照片为中心的 masonry 图库：
-
-- 左侧以文字明确标注 Library、日期档案和已保存的 Sequence。
-- 中央按最小列宽自适应排列照片，每张照片保留自身宽高比，文件名与日期始终显示。
-- 底部常显所选照片的拍摄时间、相机、镜头和来源操作，并提供相似照片与加入 Sequence 的入口。
-
-视觉语言保留深色档案工具的克制与精确，导航和操作使用系统原生 Liquid Glass 材质与圆角。
-键盘作为 GUI 的加速层，目前支持搜索、刷新、调整缩略图大小、方向键选择和 Space 单图预览。
-
-AI 不以聊天窗口作为主要形态。
-它嵌入搜索结果、关系解释、主题聚类和 Sequence 建议中，并且每个判断都能回到具体照片与元数据。
-
-## Core loop
-
-1. **Discover**：按日期、地点、相机、镜头、评分、颜色、主体或自然语言检索。
-2. **Understand**：查看照片之间的时间、视觉与语义关系，以及关系成立的依据。
-3. **Sequence**：把照片编排成一个可命名、可注释、可迭代的视觉序列。
-4. **Act**：在 DxO 中打开 RAW、在 Finder 中定位、导出选片或生成派生作品。
-
-## Data architecture
-
-Latent 将数据明确分成三层：
-
-### 1. Immutable archive
-
-原始 RAW、JPEG、视频和 DxO `.dop` 等 sidecar 保留在 aDrive 摄影档案中。
-浏览、搜索和策展默认只读，不在后台移动、重命名或覆盖原始素材。
-
-### 2. Rebuildable local index
-
-本地保存可重新生成的数据，包括：
-
-- 文件路径、尺寸、哈希和可用性状态
-- EXIF 与拍摄时间
-- 缩略图与中等尺寸预览
-- 视觉 embedding、聚类与搜索索引
-
-这一层可以删除后从档案重建，不承担唯一数据源的职责。
-
-### 3. Writable workspace
-
-本地工作区保存用户真正创造的状态，包括：
-
-- 评分、标签与笔记
-- 已保存的搜索
-- Sequence 与照片顺序
-- 策展解释和派生输出记录
-
-这一层需要独立备份，并保持可导出、可迁移。
-
-## Network-aware preview
-
-Latent 不依赖 Finder/macFUSE 的整文件物化来完成日常浏览。
-首选路径是直接使用 CloudDrive API 获取元数据与字节范围：
-
-- RAW 优先读取文件内部嵌入的 JPEG preview，不下载整张 RAW。
-- JPEG 与视频优先使用存储服务提供的 thumbnail 或 preview URL。
-- 完整原片仅在用户明确打开、编辑或导出时获取。
-
-CloudDrive 1.0.16 在 macOS 上提供按需流式读取大文件的能力，但它与 Latent 的批量索引路径承担不同职责。
-批量 contact sheet 与 inspector 继续使用可验证的 HTTP Range，并在服务端忽略 Range 时拒绝读取完整响应。
-用户明确把原片交给 DxO 时，可以把 macFUSE 挂载路径作为候选 handoff 通道，使编辑器按自己的访问模式读取文件。
-Finder 双击或“打开方式”仍可能先要求完整下载，因此不能被 Latent 当作流式 handoff。
-直接 handoff 还需要用一张未缓存 RAW 做端到端验证，确认具体启动方式不会回退到 Finder 的完整物化路径。
-已经读取的原片区段会占用 CloudDrive 本地缓存，这部分空间与 Latent 自己的派生预览缓存相互独立。
-
-初始缓存方案为可配置的 8 GB 上限：
-
-- 约 3 GB 常驻 contact thumbnails
-- 约 4 GB 中等尺寸预览 LRU
-- 约 1 GB 高分辨率临时缓存
-
-首轮索引优先处理最近日期，并在可暂停、可恢复的后台任务中逐步补齐历史缩略图和 embedding。
-未来从存储卡导入时，应在上传前生成预览，使新照片进入档案后立即可用。
-
-## MVP
-
-第一版只证明一件事：网络档案可以像本地照片库一样被快速重新使用。
-
-MVP 包含：
-
-1. 不完整下载 RAW 即可建立文件、EXIF、哈希与预览索引。
-2. 可流畅浏览的 contact sheet 与单图 inspector。
-3. 元数据筛选和自然语言检索。
-4. Sequence 创建、排序、命名与注释。
-5. 将选中的原始文件交给 DxO，或在 Finder 中定位。
-
-归档健康度、导入队列和缺失文件检查属于辅助界面，不占据首页中心。
-
-## Safety contract
-
-- 保留每一张 RAW，除非用户针对明确文件给出删除授权。
-- 拍摄日期以相机写入的 `EXIF:DateTimeOriginal` 为准。
-- 同名冲突必须保留双方，不静默覆盖。
-- DxO sidecar 与对应 RAW 一起追踪。
-- 任何会修改远端档案的能力都必须显式触发、可预览并留下记录。
-- 缓存和索引损坏不能影响原始档案与工作区数据。
-
-## Non-goals
-
-- 替代 aDrive 或承担云备份职责
-- 替代 DxO PhotoLab 的 RAW 调色与降噪
-- 自动整理或重写远端目录结构
-- 以聊天机器人包装一个普通文件浏览器
-- 在缺乏出处时为照片编造地点、人物或故事
-
-## Initial success targets
-
-- 已缓存的 contact sheet 在本地即时出现。
-- 普通网络状态下，未缓存 RAW 的嵌入预览目标在约 1.5 秒内可见。
-- 浏览与检索不会触发完整 RAW 的批量下载。
-- 用户能在数万张照片中，从一次搜索完成一个 Sequence，并无缝进入 DxO。
-- 在只读模式下运行时，远端摄影档案保持零修改。
-
-## Delivery plan
-
-### Phase 0: Read-only spike
-
-验证 CloudDrive API、范围读取、ARW 内嵌预览提取、SQLite 索引和缓存淘汰策略。
-核心纵向链路已在三张真实 ARW 上跑通，包括 A7R II、A7R V、横幅和竖幅样本。
-
-### Phase 1: Library and discovery MVP
-
-完成真实档案索引、contact sheet、inspector、Gemini API embedding、跨日期语义搜索、相似照片、受约束 Curator 和 Sequence。
-日期目录扫描、可恢复预览队列和本地只读 contact sheet 已经完成首轮真实验证。
-完整摄影档案的元数据遍历已发现 25,793 个 ARW 条目，首轮预览任务已经全部成功完成。
-日期分页已在包含 2,656 张照片的真实日期上完成端到端验证，并能到达最后一页。
-embedding queue、语义搜索、相似照片、grounded Curator、跨年份 motif 和 Sequence 链路已经完成有界验证。
-全库 Gemini API 向量构建已完成；当前 12 个视觉 motif 覆盖全部照片，其中 10 个同时包含 2025 和 2026 年的照片。
-
-### Phase 2: Curator expansion
-
-在第一版无标签视觉 motif 之上，加入可比较的策展方向、Curator 状态保存和更完整的派生建议。
-
-### Phase 3: Derivatives
-
-从 Sequence 衍生网页、书稿、展览墙、短片分镜、年度回顾和可复用研究笔记。
-
-## Open decisions
-
-- 原生 SwiftUI、Tauri 或其他 macOS 桌面技术栈
-- CloudDrive API 的稳定接入与凭证边界
-- 8 GB 默认缓存是否需要按磁盘空间动态调整
-- 新增照片的增量 API 索引调度与月度费用预算
-- Curator 输出的保存、重算与版本边界
-- Writable workspace 的自动备份频率与目标位置
-- Sequence 的衍生导出目标与跨设备同步边界
+Latent is licensed under the [Apache License 2.0](LICENSE).

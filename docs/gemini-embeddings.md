@@ -109,7 +109,7 @@ Validation passed 74 tests, Ruff, JavaScript syntax checks, and wheel/source-dis
 Live desktop and 390-pixel mobile browser checks exercised Chinese search, the inspector, stored-vector similarity, and motif discovery without console errors.
 The catalog, Sequence workspace, and Gemini index passed SQLite integrity checks.
 The first production batch stored 128 vectors successfully in 35.95 seconds.
-The following paragraphs record the September 5 handoff; current runtime information is in [project status](project-status.md).
+The following paragraphs record the September 5 handoff and are kept as history.
 Inspect `latent embedding-status --json` for current completion instead of treating this migration record as proof of completion.
 At background handoff, 1,984 of 25,793 vectors were stored and the remaining 23,809 jobs were pending, with no failed jobs.
 Four-worker generation encountered sustained HTTP 429 responses, including a single-image diagnostic request, and stopped cleanly with its remaining jobs pending.
@@ -127,7 +127,6 @@ On October 1, completion was verified against the current local catalog: all 25,
 Every vector's asset identity and fingerprint matched the catalog, all contact files were present, and all vector values were finite with norms within 0.0001 of one.
 The final September 27 worker report recorded 17,697 successful photos in 1,720.227 seconds, with no retries or provider errors during that last segment.
 That segment's reported estimate is not the total migration bill.
-Current completion evidence and retrieval observations are recorded in [project status](project-status.md).
 
 ## Official references
 
