@@ -23,8 +23,10 @@ def _cloud_folder_identity(path: Path) -> dict | None:
     """Use the provider's folder ID for CloudFS, whose device and inode change on remount."""
     if sys.platform != "darwin":
         return None
+    # Listing mounts takes milliseconds, but a busy Mac can delay the process for seconds.
+    # A timeout fails the folder check, so it only guards against a mount that never returns.
     listing = subprocess.run(
-        ["/sbin/mount"], check=True, capture_output=True, text=True, timeout=5
+        ["/sbin/mount"], check=True, capture_output=True, text=True, timeout=30
     ).stdout
     roots = [
         Path(line.removeprefix("CloudFS on ").rsplit(" (", 1)[0])
