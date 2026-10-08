@@ -7,6 +7,8 @@ It builds a fast local index of previews and metadata, so you can browse the who
 You can search photos by meaning, find related pictures across years, grade and caption them, and arrange selections into Sequences.
 Originals stay where they are: on a local disk, an external drive, or a mounted cloud drive.
 
+![The Latent library window: a timeline sidebar and a grid of photos filtered by date and rating](assets/screenshots/latent-library.webp)
+
 > **Status: developer preview.**
 > Latent runs from a source checkout on Apple Silicon Macs with macOS 26.
 > There is no packaged download yet.
