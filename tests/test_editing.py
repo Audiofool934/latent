@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from conftest import join_worker
 
 from latent.editing import EditingManager
 from latent.models import RemoteAsset
@@ -64,7 +65,7 @@ def ready_batch(manager, cloud):
             }
         ]
     )
-    manager.worker.join(2)
+    join_worker(manager.worker)
     batch = manager.get(batch["id"])
     assert batch["status"] == "ready", batch
     return batch
@@ -125,7 +126,7 @@ def test_verified_upload_removes_raw_but_keeps_exports_and_restores_edits(tmp_pa
         assert len(prepared["uploads"]) == 2
         assert all("/_Latent Edits/" in item["remote_path"] for item in prepared["uploads"])
         manager.finish(batch["id"], "keep_exports")
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "complete"
         assert not (folder / "DSC001.ARW").exists()
         assert (folder / "exports" / "DSC001.jpg").read_bytes() == b"finished JPEG"
@@ -159,7 +160,7 @@ def test_external_working_folder_survives_restart_cleanup_and_destination_change
         assert restored["folder"] == str(folder)
         assert restored["status"] == "prepared"
         reopened.finish(batch["id"], "keep_exports")
-        reopened.worker.join(2)
+        join_worker(reopened.worker)
         assert reopened.get(batch["id"])["status"] == "complete"
         assert not (folder / "DSC001.ARW").exists()
         assert (folder / "exports" / "DSC001.jpg").read_bytes() == b"finished JPEG"
@@ -223,13 +224,13 @@ def test_unconfirmed_cloud_copy_waits_then_verification_keeps_every_local_file(t
         folder = add_edits(batch)
         manager.prepare(batch["id"])
         manager.finish(batch["id"], "clear_batch")
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "waiting_cloud"
         assert manager.get(batch["id"])["error"] is None
         assert len([p for p in folder.rglob("*") if p.is_file()]) == 3
         cloud.confirmed = True
         manager.verify(batch["id"])
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "cloud_verified"
         assert len([p for p in folder.rglob("*") if p.is_file()]) == 3
         assert len(cloud.uploads) == 2
@@ -246,7 +247,7 @@ def test_edit_changed_after_review_is_kept_and_can_be_reviewed_again(tmp_path):
         first = manager.prepare(batch["id"])
         (folder / "DSC001.ARW.dop").write_bytes(b"new unsaved snapshot")
         manager.finish(batch["id"], "keep_exports")
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "needs_attention"
         assert (folder / "DSC001.ARW").exists()
         second = manager.prepare(batch["id"])
@@ -276,7 +277,7 @@ def test_cloud_confirmation_is_polled_before_cleanup(tmp_path):
         folder = add_edits(batch)
         manager.prepare(batch["id"])
         manager.finish(batch["id"], "keep_exports")
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "complete"
         assert len(calls) >= 6
         assert not (folder / "DSC001.ARW").exists()
@@ -294,7 +295,7 @@ def test_legacy_hash_error_can_be_verified_without_upload_or_cleanup(tmp_path):
         folder = add_edits(batch)
         manager.prepare(batch["id"])
         manager.finish(batch["id"], "clear_batch")
-        manager.worker.join(2)
+        join_worker(manager.worker)
         failed = manager.get(batch["id"])
         failed.update(
             status="needs_attention", error="CloudDrive has not confirmed all cloud hashes"
@@ -305,7 +306,7 @@ def test_legacy_hash_error_can_be_verified_without_upload_or_cleanup(tmp_path):
         }
         cloud.confirmed = True
         manager.apply_action(batch["id"], "verify", expected_updated_at=failed["updated_at"])
-        manager.worker.join(2)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "cloud_verified"
         assert manager.get(batch["id"])["error"] is None
         assert {
@@ -343,7 +344,7 @@ def test_partial_download_never_becomes_ready_and_can_resume_after_restart(tmp_p
             }
         ]
     )
-    manager.worker.join(2)
+    join_worker(manager.worker)
     assert manager.get(batch["id"])["status"] == "needs_attention"
     assert not (Path(manager.get(batch["id"])["folder"]) / "DSC001.ARW").exists()
     manager.close()
@@ -351,7 +352,7 @@ def test_partial_download_never_becomes_ready_and_can_resume_after_restart(tmp_p
     reopened = EditingManager(tmp_path, cloud=cloud)
     try:
         reopened.resume(batch["id"])
-        reopened.worker.join(2)
+        join_worker(reopened.worker)
         assert reopened.get(batch["id"])["status"] == "ready"
     finally:
         reopened.close()
@@ -375,7 +376,7 @@ def test_duplicate_basenames_share_one_folder_without_overwriting(tmp_path):
     manager = EditingManager(tmp_path, cloud=cloud)
     try:
         batch = manager.create(records)
-        manager.worker.join(2)
+        join_worker(manager.worker)
         batch = manager.get(batch["id"])
         assert batch["status"] == "ready"
         names = [item["local_path"] for item in batch["items"]]
@@ -398,7 +399,7 @@ def test_cleanup_can_resume_after_restart_without_redownloading_raws(tmp_path, s
     actual_cleanup = manager._cleanup
     manager._cleanup = lambda batch: (_ for _ in ()).throw(OSError("Simulated stop before cleanup"))
     manager.finish(batch["id"], "keep_exports")
-    manager.worker.join(2)
+    join_worker(manager.worker)
     assert manager.get(batch["id"])["phase"] == "cleanup"
     interrupted = manager.get(batch["id"])
     interrupted["status"] = saved_status
@@ -409,7 +410,7 @@ def test_cleanup_can_resume_after_restart_without_redownloading_raws(tmp_path, s
     reopened = EditingManager(tmp_path, cloud=cloud)
     try:
         reopened.resume(batch["id"])
-        reopened.worker.join(2)
+        join_worker(reopened.worker)
         assert reopened.get(batch["id"])["status"] == "complete"
         assert len(cloud.sources) == before
         assert not (folder / "DSC001.ARW").exists()
