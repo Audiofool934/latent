@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from uuid import uuid4
 
 import pytest
+from conftest import WORKER_TIMEOUT, join_worker
 from test_folder_workflow import change, image, records, scan, setup_library
 from test_search import _seed_vectors
 from test_web_server import (
@@ -138,7 +139,7 @@ def test_trash_moves_original_restores_annotations_and_survives_interruption(tmp
     identifier = str(uuid4())
     try:
         batch = manager.create(identifier, selected)
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(identifier)["status"] == "trashed"
         target = original / batch["items"][0]["trash_relative"]
         assert target.read_bytes() == contents and not photo.exists()
@@ -157,16 +158,16 @@ def test_trash_moves_original_restores_annotations_and_survives_interruption(tmp
     try:
         assert reopened.get(identifier)["status"] == "interrupted"
         reopened.action(identifier, restore=False)
-        reopened.worker.join(3)
+        join_worker(reopened.worker)
         assert reopened.get(identifier)["status"] == "trashed"
         photo.write_bytes(b"new unrelated file")
         reopened.action(identifier, restore=True)
-        reopened.worker.join(3)
+        join_worker(reopened.worker)
         assert reopened.get(identifier)["status"] == "needs_attention"
         assert photo.read_bytes() == b"new unrelated file" and target.read_bytes() == contents
         photo.unlink()
         reopened.action(identifier, restore=True)
-        reopened.worker.join(3)
+        join_worker(reopened.worker)
         assert reopened.get(identifier)["status"] == "restored"
         assert photo.read_bytes() == contents
         assert records(locations)[0]["id"] == selected[0]["id"]
@@ -190,18 +191,18 @@ def test_changed_original_and_symlink_trash_never_move_other_data(tmp_path):
         # A same-size rewrite is still rejected by the indexed mtime/fingerprint.
         selected[0]["size_bytes"] = len(modified)
         batch = manager.create(str(uuid4()), selected)
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "needs_attention"
         assert photo.read_bytes() == modified
         manager.action(batch["id"], restore=True)
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "restored"
         scan(locations)
         outside = tmp_path / "outside"
         outside.mkdir()
         (original / ".Latent Trash").symlink_to(outside, target_is_directory=True)
         batch = manager.create(str(uuid4()), records(locations))
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "needs_attention"
         assert list(outside.iterdir()) == [] and photo.read_bytes() == modified
     finally:
@@ -227,13 +228,15 @@ def test_trash_api_requires_matching_identity_and_replays_without_deleting_again
         assert error.value.code == 400 and photo.is_file()
         payload["expected"]["data_id"] = health["data_id"]
         post(base + "/api/trash", payload)
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + WORKER_TIMEOUT
         while True:
             batches, _ = _get_json(base + "/api/trash")
-            if batches["batches"][0]["status"] == "trashed":
+            status = batches["batches"][0]["status"]
+            if status not in {"queued", "moving"}:
                 break
-            assert time.monotonic() < deadline
+            assert time.monotonic() < deadline, f"Trash still {status}"
             time.sleep(0.01)
+        assert status == "trashed", batches["batches"][0]
         replay = post(base + "/api/trash", payload)
         assert replay["batch"]["id"] == payload["request_id"]
         page, _ = _get_json(base + "/api/assets")
@@ -249,7 +252,7 @@ def test_all_trashed_photos_can_restore_after_source_is_reconnected(tmp_path):
     manager = PhotoTrash(locations)
     try:
         batch = manager.create(str(uuid4()), selected)
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "trashed"
         relocated = tmp_path / "remounted-originals"
         original.rename(relocated)
@@ -260,7 +263,7 @@ def test_all_trashed_photos_can_restore_after_source_is_reconnected(tmp_path):
             path=str(relocated),
         )
         manager.action(batch["id"], restore=True)
-        manager.worker.join(3)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "restored"
         assert (relocated / "one.jpg").is_file()
         assert records(locations)[0]["id"] == selected[0]["id"]

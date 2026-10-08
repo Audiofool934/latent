@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import join_worker
 from PIL import Image
 
 from latent.editing import EditingManager
@@ -46,7 +47,7 @@ def scan(locations):
         indexer.start(locations.get()["revision"])
         # An empty folder completes without starting an import worker.
         if indexer.worker is not None:
-            indexer.worker.join(10)
+            join_worker(indexer.worker)
         assert not indexer.busy
         assert indexer.status()["status"] == "complete", indexer.status()
         return indexer.status()
@@ -65,7 +66,7 @@ def ready_batch(locations, tmp_path):
         locations.path.parent, files_dir=tmp_path / "Pictures", locations=locations
     )
     batch = manager.create(records(locations))
-    manager.worker.join(10)
+    join_worker(manager.worker)
     batch = manager.get(batch["id"])
     assert batch["status"] == "ready", batch
     return manager, batch
@@ -155,7 +156,7 @@ def test_folder_output_selects_subset_and_preserves_original_hierarchy_and_worki
             "",
             exports=[{"local_path": chosen["local_path"], "asset_id": chosen["asset_id"]}],
         )
-        manager.worker.join(10)
+        join_worker(manager.worker)
         done = manager.get(batch["id"])
         assert done["status"] == "saved", done
         item = next(i for i in batch["items"] if i["asset_id"] == chosen["asset_id"])
@@ -187,7 +188,7 @@ def test_renamed_exports_require_mapping_and_prepared_output_never_redirects(tmp
         other.mkdir()
         change(locations, "set_output", path=str(other))
         manager.finish(batch["id"], "", exports=selected)
-        manager.worker.join(10)
+        join_worker(manager.worker)
         assert manager.get(batch["id"])["status"] == "saved"
         assert (output / "2025/trip/renamed.jpg").is_file()
         assert list(other.iterdir()) == []

@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from conftest import join_worker
 from PIL import Image
 
 from latent.archive_copies import ArchiveCopies
@@ -54,7 +55,7 @@ def setup(tmp_path):
 def action(manager, batch, name, path=None):
     result = manager.action(batch["id"], name, manager.get(batch["id"])["revision"], path)
     if manager.worker:
-        manager.worker.join(10)
+        join_worker(manager.worker)
         assert not manager.busy
     return manager.get(result["id"])
 
@@ -120,7 +121,7 @@ def test_two_camera_import_keeps_sources_sidecars_identity_and_has_no_automatic_
         try:
             scanner.start(locations.get()["revision"])
             if scanner.worker:
-                scanner.worker.join(10)
+                join_worker(scanner.worker)
             assert scanner.status()["indexed"] == 0
             with StateStore(locations.state_dir) as store:
                 assert store.library_asset_count() == 2
@@ -253,7 +254,7 @@ def test_verified_archive_is_used_for_editing_when_portable_drive_is_offline(tmp
             locations.path.parent, locations=locations, files_dir=tmp_path / "working"
         )
         edit = editor.create(records)
-        editor.worker.join(10)
+        join_worker(editor.worker)
         edit = editor.get(edit["id"])
         assert edit["status"] == "ready", edit
         for item in edit["items"]:
@@ -293,14 +294,14 @@ def test_selected_embeddings_never_encode_unselected_pending_jobs_or_prune_exist
         assert plan["to_generate"] == 1
         assert not encoder.calls
         runs.action(plan["id"], "start", plan["revision"])
-        runs.worker.join(10)
+        join_worker(runs.worker)
         assert runs.get(plan["id"])["status"] == "complete"
         assert len(encoder.calls) == 1
         with EmbeddingStore(embedding_dir, model_id="fixture", dimensions=4) as store:
             assert store.job_counts() == {"succeeded": 1, "pending": 1, "failed": 0, "running": 0}
         second = runs.prepare(str(uuid4()), "selected", [assets[1].asset_id])
         runs.action(second["id"], "start", second["revision"])
-        runs.worker.join(10)
+        join_worker(runs.worker)
         with EmbeddingStore(embedding_dir, model_id="fixture", dimensions=4) as store:
             assert len(store.vector_rows()) == 2
         all_photos = runs.prepare(str(uuid4()), "all")
@@ -414,7 +415,7 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
             )
         assert stale.value.code == 400
         request(f"/api/imports/{batch['id']}/start", action_body)
-        server.imports.worker.join(10)
+        join_worker(server.imports.worker)
         second = request(
             "/api/imports",
             {
@@ -427,7 +428,7 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
             f"/api/imports/{second['id']}/start",
             {**expected, "expected_revision": second["revision"]},
         )
-        server.imports.worker.join(10)
+        join_worker(server.imports.worker)
         assert request("/api/assets")["total"] == 2
         scoped = request(f"/api/assets?import_id={batch['id']}")
         assert scoped["total"] == 1
@@ -447,7 +448,7 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
             f"/api/embedding-runs/{plan['id']}/start",
             {**expected, "expected_revision": plan["revision"]},
         )
-        server.embedding_runs.worker.join(10)
+        join_worker(server.embedding_runs.worker)
         assert request("/api/embedding-runs")["runs"][0]["status"] == "complete"
         assert len(encoder.calls) == 1
         assert request("/api/imports")["data_id"] == identity
@@ -474,7 +475,7 @@ def test_embedding_pause_during_failed_batch_does_not_start_fallback_requests(tm
         action(manager, batch, "start")
         plan = runs.prepare(str(uuid4()), "all")
         runs.action(plan["id"], "start", plan["revision"])
-        runs.worker.join(10)
+        join_worker(runs.worker)
         assert runs.get(plan["id"])["status"] == "paused"
         assert len(encoder.calls) == 1
         with EmbeddingStore(tmp_path / "embeddings", model_id="fixture", dimensions=4) as store:
@@ -498,7 +499,7 @@ def test_previews_are_shared_between_legacy_scan_and_import_after_restart(tmp_pa
         scanner = FolderIndexer(locations, manager)
         assert scanner.imports is manager
         scanner.start(locations.get()["revision"])
-        manager.worker.join(10)
+        join_worker(manager.worker)
         assert scanner.status()["indexed"] == 1
         assert manager.get(batch["id"])["preview_ready"] == 1
         with StateStore(locations.state_dir) as store:
@@ -629,11 +630,11 @@ def test_legacy_scan_can_be_paused_and_resumed_through_import_http(tmp_path, mon
         assert server.imports.worker is preview_worker
         request(f"/api/imports/{batch['id']}/pause", body)
         release.set()
-        preview_worker.join(10)
+        join_worker(preview_worker)
         paused = request("/api/imports")["batches"][0]
         assert paused["status"] == "paused" and paused["preview_ready"] == 1
         request(f"/api/imports/{batch['id']}/resume", body)
-        server.imports.worker.join(10)
+        join_worker(server.imports.worker)
         complete = request("/api/imports")["batches"][0]
         assert complete["status"] == "ready" and complete["preview_ready"] == 3
         assert request("/api/embedding-runs")["runs"] == []

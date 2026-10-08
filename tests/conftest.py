@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,13 @@ def fake_keychain(tmp_path, monkeypatch, fake_security_tool) -> Path:
 def security_calls(store: Path) -> list[list[str]]:
     log = Path(str(store) + ".argv")
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+# Test jobs normally finish in a second or two. The limit is generous so that a busy machine
+# cannot fail a test. It only stops a hung worker from hanging the whole run.
+WORKER_TIMEOUT = 60
+
+
+def join_worker(worker: threading.Thread) -> None:
+    worker.join(WORKER_TIMEOUT)
+    assert not worker.is_alive(), f"{worker.name} did not finish in {WORKER_TIMEOUT} seconds"

@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import pytest
+from conftest import join_worker
 from PIL import Image
 
 from latent import embeddinggemma
@@ -474,12 +475,12 @@ def test_local_generation_is_scoped_resumable_and_never_touches_the_gemini_index
         # Pause after the first photo, as the AI Search pause button does.
         local_encoder.after_image = runs.stop.set
         runs.action(plan["id"], "start", plan["revision"])
-        runs.worker.join(10)
+        join_worker(runs.worker)
         paused = runs.get(plan["id"])
         assert paused["status"] == "paused" and paused["succeeded"] == 1
         local_encoder.after_image = None
         runs.action(plan["id"], "resume", plan["revision"])
-        runs.worker.join(10)
+        join_worker(runs.worker)
         assert runs.get(plan["id"])["status"] == "complete"
         assert local_encoder.image_calls == 3
         assert gemini_encoder.image_calls == 3  # only the earlier direct Gemini build
