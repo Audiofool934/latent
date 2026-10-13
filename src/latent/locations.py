@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -19,20 +20,43 @@ from .workspace import write_workspace_export
 TRASH_FOLDER = ".Latent Trash"
 
 
+# A mount listing stays valid briefly, so an import's repeated folder checks share one listing.
+# A stale listing still fails closed: CloudDrive must confirm each cloud mount point.
+_MOUNT_CACHE_SECONDS = 2.0
+_mount_lock = threading.Lock()
+_mount_cache: tuple[float, list[Path]] | None = None
+
+
+def _cloudfs_roots() -> list[Path]:
+    """Return the CloudFS mount points, reusing a listing from the last few seconds."""
+    global _mount_cache
+    with _mount_lock:
+        if _mount_cache and time.monotonic() < _mount_cache[0]:
+            return _mount_cache[1]
+        # Listing mounts takes milliseconds, but a busy Mac can delay the process for seconds.
+        # The timeout only guards against a mount that never returns.
+        try:
+            listing = subprocess.run(
+                ["/sbin/mount"], check=True, capture_output=True, text=True, timeout=30
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ConfigurationError(
+                "Could not list mounted volumes to check this folder. Retry in a moment"
+            ) from error
+        roots = [
+            Path(line.removeprefix("CloudFS on ").rsplit(" (", 1)[0])
+            for line in listing.splitlines()
+            if line.startswith("CloudFS on ") and " (macfuse," in line
+        ]
+        _mount_cache = (time.monotonic() + _MOUNT_CACHE_SECONDS, roots)
+        return roots
+
+
 def _cloud_folder_identity(path: Path) -> dict | None:
     """Use the provider's folder ID for CloudFS, whose device and inode change on remount."""
     if sys.platform != "darwin":
         return None
-    # Listing mounts takes milliseconds, but a busy Mac can delay the process for seconds.
-    # A timeout fails the folder check, so it only guards against a mount that never returns.
-    listing = subprocess.run(
-        ["/sbin/mount"], check=True, capture_output=True, text=True, timeout=30
-    ).stdout
-    roots = [
-        Path(line.removeprefix("CloudFS on ").rsplit(" (", 1)[0])
-        for line in listing.splitlines()
-        if line.startswith("CloudFS on ") and " (macfuse," in line
-    ]
+    roots = _cloudfs_roots()
     matches = [root for root in roots if path.is_relative_to(root)]
     if not matches:
         return None
