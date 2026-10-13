@@ -111,6 +111,50 @@ def test_cloud_folder_survives_remount_but_rejects_a_different_remote_folder(tmp
         check_folder(identity)
 
 
+def test_mount_listing_is_shared_briefly_and_failures_are_user_safe(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from latent.errors import ConfigurationError
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("latent.locations._mount_cache", None)
+    calls = []
+
+    def mount(arguments, **options):
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "/dev/disk3s1 on / (apfs, local)\n")
+
+    monkeypatch.setattr("latent.locations.subprocess.run", mount)
+    identity = folder_identity(str(tmp_path))
+    assert check_folder(identity) == tmp_path
+    assert check_folder(identity) == tmp_path
+    assert len(calls) == 1
+    monkeypatch.setattr("latent.locations._MOUNT_CACHE_SECONDS", 0)
+    monkeypatch.setattr("latent.locations._mount_cache", None)
+    check_folder(identity)
+    check_folder(identity)
+    assert len(calls) == 3
+
+    for failure in (
+        subprocess.TimeoutExpired(["/sbin/mount"], 30),
+        subprocess.CalledProcessError(1, ["/sbin/mount"]),
+        FileNotFoundError("/sbin/mount"),
+    ):
+
+        def broken(arguments, failure=failure, **options):
+            raise failure
+
+        monkeypatch.setattr("latent.locations.subprocess.run", broken)
+        with pytest.raises(ConfigurationError, match="Could not list mounted volumes"):
+            check_folder(identity)
+    # A failed listing is not cached, so the next check runs mount again.
+    monkeypatch.setattr("latent.locations._MOUNT_CACHE_SECONDS", 60)
+    monkeypatch.setattr("latent.locations.subprocess.run", mount)
+    check_folder(identity)
+    assert len(calls) == 4
+
+
 def test_local_folder_still_requires_its_original_device_and_inode(tmp_path, monkeypatch):
     from latent.errors import ConfigurationError
 
