@@ -11,6 +11,8 @@ swift build --package-path "$task_root/macos" -c "$task_configuration" --product
 task_bin="$(swift build --package-path "$task_root/macos" -c "$task_configuration" --show-bin-path)"
 task_app="$task_root/var/native/Latent.app"
 mkdir -p "$task_app/Contents/MacOS" "$task_app/Contents/Resources"
+# Replace rather than overwrite the executable, so a running copy keeps its own file.
+rm -f "$task_app/Contents/MacOS/Latent"
 cp "$task_bin/Latent" "$task_app/Contents/MacOS/Latent"
 cp "$task_root/macos/Resources/Info.plist" "$task_app/Contents/Info.plist"
 cp "$task_root/macos/Resources/Latent.icns" "$task_app/Contents/Resources/AppIcon.icns"
@@ -31,6 +33,18 @@ Path(sys.argv[1]).write_text(json.dumps({
     "workspaceDirectory": str(DEFAULT_WORKSPACE_DIR.resolve()),
 }, indent=2) + "\n")
 PY
-codesign --force --sign - "$task_app"
+# macOS ties privacy permissions, such as access to CloudDrive's data, to the signing identity.
+# An ad hoc signature changes with every build, so those permissions would be lost on each rebuild.
+task_identity="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Apple Development: /{print $2; exit}' || true)"
+if [[ -n "$task_identity" ]] && codesign --force --sign "$task_identity" "$task_app"; then
+    printf '%s\n' "Signed with the Apple Development identity." >&2
+else
+    if [[ -n "$task_identity" ]]; then
+        printf '%s\n' "Could not sign with the Apple Development identity; using an ad hoc signature." \
+            "macOS privacy permissions, such as CloudDrive data access, must be granted again." >&2
+    fi
+    codesign --force --sign - "$task_app"
+fi
 touch "$task_app"
 printf '%s\n' "$task_app"

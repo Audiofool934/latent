@@ -20,7 +20,9 @@ scripts/build-macos.sh
 open var/native/Latent.app
 ```
 
-The build script creates an ad hoc signed local application at `var/native/Latent.app`.
+The build script creates a local application at `var/native/Latent.app`.
+It signs with the first valid Apple Development identity in the keychain, so macOS privacy permissions, such as access to CloudDrive's data, survive rebuilds.
+Without one, or if that signing fails, it falls back to an ad hoc signature, which changes on every build; macOS then denies those permissions until they are reset and granted again.
 This is a development build, not a notarized distribution release.
 The app icon uses `assets/brand/Latent-Mark-v1.svg`, packaged at standard and Retina sizes in `macos/Resources/Latent.icns`.
 The export places the original artwork on an inset white tile with continuous rounded corners, transparent margins, and a subtle shadow so its Dock footprint matches other macOS apps.

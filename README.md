@@ -87,7 +87,9 @@ scripts/build-macos.sh
 open var/native/Latent.app
 ```
 
-The build script creates an ad hoc signed app at `var/native/Latent.app`.
+The build script creates the app at `var/native/Latent.app`.
+It signs the app with your Apple Development identity when your keychain has one, so macOS keeps privacy permissions, such as access to CloudDrive's data, across rebuilds.
+Without that identity, the app gets an ad hoc signature, and those permissions must be granted again after each rebuild.
 The app uses this checkout's Python environment, so rebuild it if you move the project.
 Opening the app starts a local service on `127.0.0.1:8766`, and quitting the app stops it.
 Latent keeps its data in `~/Library/Application Support/Latent/`.
