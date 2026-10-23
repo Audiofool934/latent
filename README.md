@@ -2,6 +2,8 @@
 
 A personal photographic workspace for rediscovery, curation, and new work.
 
+Project page: [latent.audiofool.ai](https://latent.audiofool.ai)
+
 Latent is a macOS app for photographers with a large archive of RAW and JPEG files.
 It builds a fast local index of previews and metadata, so you can browse the whole archive without downloading originals.
 You can search photos by meaning, find related pictures across years, grade and caption them, and arrange selections into Sequences.
