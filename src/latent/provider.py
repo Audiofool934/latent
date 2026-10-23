@@ -314,10 +314,17 @@ def _normalize_endpoint(endpoint: str) -> tuple[str, str]:
 
 
 def _load_device_token(plist_path: Path) -> str:
-    if not plist_path.is_file():
-        raise ConfigurationError(f"CloudDrive preferences were not found: {plist_path}")
-    with plist_path.open("rb") as handle:
-        preferences: Mapping[str, object] = plistlib.load(handle)
+    try:
+        if not plist_path.is_file():
+            raise ConfigurationError(f"CloudDrive preferences were not found: {plist_path}")
+        with plist_path.open("rb") as handle:
+            preferences: Mapping[str, object] = plistlib.load(handle)
+    except PermissionError as error:
+        # macOS protects another app's group container until the user allows access.
+        raise ConfigurationError(
+            "macOS blocked access to CloudDrive's local preferences. "
+            "Allow access to CloudDrive's data in macOS privacy settings, then retry"
+        ) from error
     token = preferences.get("cloudapi.deviceToken")
     if not isinstance(token, str) or not token:
         raise ConfigurationError("CloudDrive device token is missing from local preferences")

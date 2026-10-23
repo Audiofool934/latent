@@ -155,6 +155,43 @@ def test_mount_listing_is_shared_briefly_and_failures_are_user_safe(tmp_path, mo
     assert len(calls) == 4
 
 
+def test_blocked_clouddrive_preferences_are_explained_when_connecting_or_checking(
+    tmp_path, monkeypatch
+):
+    import plistlib
+    import subprocess
+    import sys
+    from functools import partial
+
+    from latent.errors import ConfigurationError
+    from latent.provider import CloudDriveCatalog
+
+    root = tmp_path / "CloudDrive"
+    root.mkdir()
+    root = root.resolve()
+    preferences = tmp_path / "group.com.clouddrive2.CloudDrive2.plist"
+    preferences.write_bytes(plistlib.dumps({"cloudapi.deviceToken": "device-token"}))
+    # macOS refuses reads of another app's group container until the user allows access.
+    preferences.chmod(0)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("latent.locations._mount_cache", None)
+    listing = f"CloudFS on {root} (macfuse, local, nodev, nosuid, synchronous, mounted by user)\n"
+    monkeypatch.setattr(
+        "latent.locations.subprocess.run",
+        lambda arguments, **options: subprocess.CompletedProcess(arguments, 0, listing),
+    )
+    monkeypatch.setattr(
+        "latent.provider.CloudDriveCatalog", partial(CloudDriveCatalog, plist_path=preferences)
+    )
+
+    connected = {"path": str(root), "device": -1, "inode": -1, "cloud": {"remote_id": "folder"}}
+    for attempt in (lambda: folder_identity(str(root)), lambda: check_folder(connected)):
+        with pytest.raises(ConfigurationError, match="macOS blocked access") as caught:
+            attempt()
+        assert "Errno" not in str(caught.value)
+        assert "Folder is unavailable" not in str(caught.value)
+
+
 def test_local_folder_still_requires_its_original_device_and_inode(tmp_path, monkeypatch):
     from latent.errors import ConfigurationError
 
