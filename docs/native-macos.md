@@ -147,6 +147,10 @@ LATENT_TEST_PYTHON="$PWD/.venv/bin/python" PYTHONPATH="$PWD/src" \
 - Clicking a Timeline year, month or day displays all photos in that period, with pagination and restart restoration preserving the selected scope.
 - Timeline disclosure arrows expand and collapse the sidebar independently of the selected gallery.
 - Space, Return, or a double-click opens a proportional cached preview in the main image area above the review bar, keeping the sidebar, search, and context header visible.
+- Pinch or Option-scroll over the preview to zoom around the pointer, from Fit up to 8 times the fitted size.
+- Double-click the preview to switch between 2 times the fitted size and Fit; the footer also provides zoom and Fit buttons.
+- Drag or scroll a zoomed preview to pan within the image bounds; smaller image axes stay centered.
+- Ratings and flags preserve the preview's zoom and position, while changing photos starts at Fit; preview scrolling does not move the retained gallery.
 - Space toggles back to the gallery, Escape closes the preview, and W/E or left/right arrow keys move through it.
 - Next in a Library or Starred preview loads the next page at the 250-photo boundary, keeping the current photo visible until it succeeds.
 - A failed preview page offers explicit retry, and closing the preview or changing results cancels its pending navigation.
@@ -312,6 +316,7 @@ Offscreen work is canceled, with a maximum 24-item prefetch lookahead.
 The budget covers cached decoded images, not total process memory or images still retained by visible views.
 The app uses an existing larger cached preview when available and otherwise displays the contact JPEG without fetching a RAW file.
 The preview footer reports the pixels actually decoded and distinguishes contact previews from larger cached previews.
+Preview zoom enlarges that cached image, with decoding still capped at 2048 pixels on the longest edge; it does not request the original file.
 
 Measured on the real 25,793-photo catalog:
 

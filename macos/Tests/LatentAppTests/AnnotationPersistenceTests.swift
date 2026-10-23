@@ -258,6 +258,95 @@ struct AnnotationPersistenceTests {
         #expect(AnnotationProtocol.fixture.withLock { $0.photos[2]?.flag } == .pick)
     }
 
+    @Test func previewGesturesPreserveWindowShortcutsAndTextEntry() async throws {
+        let model = try await makeModel()
+        defer { cleanup(model) }
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        let canvas = PhotoPreviewCanvas(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
+        let editor = NSTextView(frame: NSRect(x: 0, y: 400, width: 640, height: 80))
+        editor.isRichText = false
+        let keyboard = GalleryKeyboard.KeyboardView(model: model)
+        defer {
+            keyboard.stop()
+            window.close()
+        }
+        content.addSubview(canvas)
+        content.addSubview(editor)
+        content.addSubview(keyboard)
+        window.contentView = content
+
+        let context = try #require(CGContext(data: nil, width: 640, height: 400,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try #require(context.makeImage())
+        model.previewSelection()
+        canvas.configure(image: image, photoID: 1, zoom: 1)
+
+        func mouse(_ type: NSEvent.EventType, point: CGPoint, clicks: Int = 1) throws -> NSEvent {
+            try #require(NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: clicks, pressure: 1))
+        }
+        func key(_ text: String, code: UInt16) throws -> NSEvent {
+            try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code))
+        }
+        // Ask the window monitor itself rather than bypassing it through handleGalleryKey.
+        // AppKit calls local monitors in no fixed order, so a second monitor cannot see what this one consumed.
+        func consumes(_ text: String, code: UInt16) throws -> Bool { keyboard.handleKey(try key(text, code: code)) }
+
+        let center = CGPoint(x: 320, y: 200)
+        canvas.mouseDown(with: try mouse(.leftMouseDown, point: center, clicks: 2))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, point: center, clicks: 2))
+        #expect(canvas.geometry.zoom == 2)
+        #expect(window.firstResponder === canvas)
+        canvas.mouseDown(with: try mouse(.leftMouseDown, point: center))
+        let moved = CGPoint(x: 350, y: 220)
+        canvas.mouseDragged(with: try mouse(.leftMouseDragged, point: moved))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, point: moved))
+        #expect(canvas.geometry.offset == CGSize(width: 30, height: 20))
+
+        #expect(try consumes("2", code: 19))
+        #expect(model.previewPhoto?.rating == 2)
+        #expect(try consumes("e", code: 14))
+        #expect(model.previewPhoto?.id == 2)
+        #expect(try consumes("q", code: 12))
+        #expect(model.previewPhoto?.flag == .pick)
+        #expect(try consumes("w", code: 13))
+        #expect(model.previewPhoto?.id == 1)
+
+        #expect(window.makeFirstResponder(editor))
+        canvas.configure(image: image, photoID: 1, zoom: canvas.geometry.zoom)
+        #expect(window.firstResponder === editor)
+        let flagBeforeTyping = model.previewPhoto?.flag
+        var passedKeys = ""
+        for (text, code): (String, UInt16) in [("e", 14), ("w", 13), ("5", 23), ("q", 12), (" ", 49)] {
+            if try !consumes(text, code: code) { passedKeys += text }
+        }
+        // The text editor keeps its typing keys: the monitor passes them on without acting.
+        #expect(passedKeys == "ew5q ")
+        #expect(model.previewPhoto?.id == 1 && model.previewPhoto?.rating == 2)
+        #expect(model.previewPhoto?.flag == flagBeforeTyping)
+
+        canvas.mouseDown(with: try mouse(.leftMouseDown, point: center))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, point: center))
+        #expect(window.firstResponder === canvas)
+        // The last key goes through AppKit to exercise the installed window monitor.
+        NSApp.sendEvent(try key(" ", code: 49))
+        #expect(model.previewPhoto == nil)
+        try await waitUntil { AnnotationProtocol.fixture.withLock { !$0.held.isEmpty } }
+        AnnotationProtocol.release()
+        try await waitUntil { !model.isSaving }
+        #expect(AnnotationProtocol.fixture.withLock { $0.photos[1]?.rating } == 2)
+        #expect(AnnotationProtocol.fixture.withLock { $0.photos[2]?.flag } == .pick)
+        #expect(!window.isVisible && !window.isKeyWindow && !window.isMainWindow)
+    }
+
     @Test func queuedCaptionsAndRatingsPreserveEachOther() async throws {
         let model = try await makeModel()
         defer { cleanup(model) }

@@ -24,22 +24,25 @@ struct GalleryKeyboard: NSViewRepresentable {
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                let handled = MainActor.assumeIsolated {
-                    guard let self, event.window === self.window else { return false }
-                    if event.keyCode == 53, self.model.sequenceDrag.payload != nil {
-                        self.model.sequenceDrag.cancel()
-                        return true
-                    }
-                    guard self.window?.attachedSheet == nil,
-                          !(self.window?.firstResponder is NSTextView),
-                          !(self.window?.firstResponder is NSTextField),
-                          !self.model.showingEditing, !self.model.showingPhotoCaption, !self.model.showingImports,
-                          self.model.sequenceEditor == nil,
-                          !self.model.showingSequences else { return false }
-                    return self.model.handleGalleryKey(event)
-                }
+                let handled = MainActor.assumeIsolated { self?.handleKey(event) ?? false }
                 return handled ? nil : event
             }
+        }
+
+        /// The window monitor's decision for one key; a handled key does not continue to the responder chain.
+        func handleKey(_ event: NSEvent) -> Bool {
+            guard event.window === window else { return false }
+            if event.keyCode == 53, model.sequenceDrag.payload != nil {
+                model.sequenceDrag.cancel()
+                return true
+            }
+            guard window?.attachedSheet == nil,
+                  !(window?.firstResponder is NSTextView),
+                  !(window?.firstResponder is NSTextField),
+                  !model.showingEditing, !model.showingPhotoCaption, !model.showingImports,
+                  model.sequenceEditor == nil,
+                  !model.showingSequences else { return false }
+            return model.handleGalleryKey(event)
         }
 
         func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
