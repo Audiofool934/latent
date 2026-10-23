@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Latent is a macOS app for photographers with a large archive. It builds a fast local index, so you can browse the whole archive, search it by meaning, and curate it without downloading the originals.">
+  <meta property="og:title" content="Latent">
+  <meta property="og:description" content="A macOS app for browsing, searching by meaning, and curating a large personal photo archive.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://latent.audiofool.ai/">
+  <meta property="og:image" content="https://latent.audiofool.ai/link-preview.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Latent</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="page.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="#top" aria-label="Latent, back to the top">
+      <svg class="mark" viewBox="112 112 800 800" aria-hidden="true">
+        <path fill-rule="evenodd" d="M 128 512 A 384 384 0 1 0 896 512 A 384 384 0 1 0 128 512 Z M 216 534 A 318 318 0 1 0 852 534 A 318 318 0 1 0 216 534 Z"/>
+        <path fill-rule="evenodd" d="M 335 572 A 237 237 0 1 0 809 572 A 237 237 0 1 0 335 572 Z M 445 607 A 162 162 0 1 0 769 607 A 162 162 0 1 0 445 607 Z"/>
+      </svg>
+      <span>Latent</span>
+    </a>
+    <nav aria-label="Page">
+      <a class="nav-search" href="#search">Try a search</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/Audiofool934/latent">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="intro" aria-labelledby="intro-title">
+      <h1 id="intro-title">Find the photographs you already took.</h1>
+      <div class="intro-text">
+        <p>Latent is a macOS app for photographers with a large archive of RAW and JPEG files. It builds a fast local index, so you can browse the whole archive, search it by meaning, and arrange what you find into Sequences. Your originals stay where they are.</p>
+        <p class="actions">
+          <a class="button" href="#install">Install Latent</a>
+          <a href="https://github.com/Audiofool934/latent">Read the source</a>
+        </p>
+        <p class="status">Developer preview · Apple&nbsp;Silicon · macOS&nbsp;26</p>
+      </div>
+    </section>
+
+    <section class="search" id="search" aria-labelledby="search-title">
+      <h2 id="search-title" class="visually-hidden">Try a search</h2>
+      <div class="finder">
+        <div class="bar" data-bar>
+          <svg class="bar-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.4 15.4 21 21"/></svg>
+          <img class="bar-reference" data-bar-reference width="30" height="30" alt="" hidden>
+          <p class="bar-text"><span class="bar-query" data-bar-query>Search indexed photos</span><span class="bar-note" data-bar-note></span></p>
+          <button type="button" class="bar-clear" data-bar-clear aria-label="Back to the text searches" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+          </button>
+        </div>
+        <div class="queries" role="group" aria-label="Searches" data-queries></div>
+      </div>
+
+      <div class="results-head">
+        <p class="results-count" data-results-count aria-live="polite"></p>
+        <fieldset class="order">
+          <legend class="visually-hidden">Sort the results</legend>
+          <label><input type="radio" name="order" value="closest" checked><span>Most similar</span></label>
+          <label><input type="radio" name="order" value="least_similar"><span>Least similar</span></label>
+          <label><input type="radio" name="order" value="variety"><span>More variety</span></label>
+        </fieldset>
+      </div>
+      <ol class="gallery" data-gallery aria-label="Results"></ol>
+      <p class="gallery-more"><button type="button" class="text-button" data-more hidden></button></p>
+      <noscript><p class="search-note">Turn on JavaScript to try the search.</p></noscript>
+      <p class="search-note">These are 21 photographs from Audiofool's archive. When this page was built, Latent's on-device engine, EmbeddingGemma 2, encoded each photo's 512-pixel contact preview and each search above. Latent's own ranking code put them in order, and the scores are cosine similarity. Open a photo to search with it instead. Nothing you do here leaves this page.</p>
+    </section>
+
+    <figure class="window">
+      <img src="library.webp" width="2000" height="1333" alt="The Latent library window: a timeline sidebar beside a grid of photos filtered by date and rating" loading="lazy" decoding="async">
+      <figcaption>The library window: a year, month, and day timeline beside a gallery filtered by date and rating, in an archive of 40,306 photos.</figcaption>
+    </figure>
+
+    <section class="tracks" aria-label="What Latent does">
+      <article class="track">
+        <header>
+          <h2>The whole archive, from previews</h2>
+          <p class="tag">Timeline</p>
+        </header>
+        <div class="track-body">
+          <p>Latent reads each photo once and keeps a local index of previews and metadata. After that, a photo-first gallery and a year, month, and day timeline move through the archive at the speed of local files. It has been tested with more than 40,000 photos.</p>
+          <p>Originals stay on a local disk, an external drive, or a mounted cloud drive. Browsing never downloads, moves, renames, or rewrites them.</p>
+        </div>
+      </article>
+
+      <article class="track">
+        <header>
+          <h2>Search by meaning</h2>
+          <p class="tag">AI Search</p>
+        </header>
+        <div class="track-body">
+          <p>Describe a photo in any language, or start from a reference image. Sort the results by most similar, least similar, or more variety, and open similar photos from any picture.</p>
+          <dl class="engines">
+            <dt>Gemini Embedding 2</dt>
+            <dd>Runs through the Gemini API. Latent uploads small contact previews when it builds the index, and sends each search.</dd>
+            <dt>EmbeddingGemma 2</dt>
+            <dd>Runs on your Mac through llama.cpp. Nothing leaves the Mac, and a search costs nothing.</dd>
+          </dl>
+          <p>Each engine keeps its own index, and you switch between them explicitly.</p>
+        </div>
+      </article>
+
+      <article class="track">
+        <header>
+          <h2>Review from the keyboard</h2>
+          <p class="tag">Contact sheet</p>
+        </header>
+        <div class="track-body">
+          <p>Rate, flag, and caption photos, star the ones you come back to, and filter by date, rating, Starred, and flag.</p>
+          <dl class="keys">
+            <dt><kbd>Space</kbd></dt><dd>Preview</dd>
+            <dt><kbd>0</kbd>–<kbd>5</kbd></dt><dd>Rating</dd>
+            <dt><kbd>Q</kbd> <kbd>R</kbd></dt><dd>Pick and reject</dd>
+            <dt><kbd>W</kbd> <kbd>E</kbd></dt><dd>Previous and next photo</dd>
+          </dl>
+        </div>
+      </article>
+
+      <article class="track">
+        <header>
+          <h2>Sequences</h2>
+          <p class="tag">Curation</p>
+        </header>
+        <div class="track-body">
+          <p>Arrange selections in order, in nested folders, with drag and drop. Export a Sequence as a folder of symbolic links to the originals, so another app can open it without copies.</p>
+        </div>
+      </article>
+
+      <article class="track">
+        <header>
+          <h2>From the card to the edit</h2>
+          <p class="tag">Imports</p>
+        </header>
+        <div class="track-body">
+          <p>Add camera cards or folders, and Latent builds previews for ARW, JPEG, HEIF, PNG, and TIFF. It can copy originals into an archive folder and verify every checksum.</p>
+          <p>Prepare a batch for DxO PhotoLab, and Latent saves the finished photos next to their originals. Interval shooting is found from EXIF data and collapsed into one entry in the timeline.</p>
+        </div>
+      </article>
+
+      <article class="track">
+        <header>
+          <h2>A curator that keeps to the evidence</h2>
+          <p class="tag">Curator</p>
+        </header>
+        <div class="track-body">
+          <p>The curator explains why photos are related and finds visual motifs that recur across years. It reports what the stored vectors and EXIF data show. It does not guess who is in a photo, where it was taken, or what story it tells.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="section privacy" id="privacy" aria-labelledby="privacy-title">
+      <h2 id="privacy-title">What leaves your Mac</h2>
+      <div class="section-body">
+        <p>Latent has no accounts and no telemetry. The catalog, the previews, the vectors, and your ratings, captions, and Sequences stay on your Mac. What leaves it depends on the search engine.</p>
+        <table>
+          <thead>
+            <tr><th scope="col">Engine</th><th scope="col">Sent off the Mac</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Gemini Embedding 2</th><td>512-pixel contact previews when you build the index, plus search text and reference images</td></tr>
+            <tr><th scope="row">EmbeddingGemma 2</th><td>Nothing</td></tr>
+          </tbody>
+        </table>
+        <ul class="ledger">
+          <li>Building an index always starts with a review of the photo count, and for Gemini, the upload size and the estimated cost. Imports never start it.</li>
+          <li>The Gemini API key stays in your login Keychain. Latent never writes it to its own files, databases, or logs.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section-wide" id="how" aria-labelledby="how-title">
+      <h2 id="how-title">Three layers, kept apart</h2>
+      <div class="section-body">
+        <ol class="layers">
+          <li>
+            <h3>The archive</h3>
+            <p class="tag">Read only</p>
+            <p>Your originals and sidecars. Browsing and search only read them. Photos you delete go to a Latent Trash folder beside them, and you can restore them from there.</p>
+          </li>
+          <li>
+            <h3>The index</h3>
+            <p class="tag">Rebuildable</p>
+            <p>Metadata, contact and preview images, and search vectors, in a local SQLite catalog and cache. Delete it, and Latent rebuilds it from the archive.</p>
+          </li>
+          <li>
+            <h3>The workspace</h3>
+            <p class="tag">Yours</p>
+            <p>Ratings, captions, flags, Sequences, imports, and search history, kept apart from the index. Export it as a backup; importing it merges and never overwrites.</p>
+          </li>
+        </ol>
+        <p>A Python service owns all three layers. The native app, built with SwiftUI and AppKit, talks to it over loopback HTTP. The same service also serves a browser gallery at <code>127.0.0.1:8766</code>.</p>
+      </div>
+    </section>
+
+    <section class="section install" id="install" aria-labelledby="install-title">
+      <h2 id="install-title">Install</h2>
+      <div class="section-body">
+        <p>Latent is a developer preview. It runs from a source checkout, and there is no packaged download yet. You need:</p>
+        <ul class="requirements">
+          <li>An Apple Silicon Mac with macOS 26 or later</li>
+          <li>Xcode or the Command Line Tools, with Swift 6.2 or later</li>
+          <li>Python 3.11 or later and <a href="https://docs.astral.sh/uv/">uv</a></li>
+          <li><a href="https://exiftool.org">ExifTool</a>, from <code>brew install exiftool</code></li>
+        </ul>
+        <div class="commands">
+          <pre id="install-commands"><code>git clone https://github.com/Audiofool934/latent.git
+cd latent
+uv sync
+scripts/build-macos.sh
+open var/native/Latent.app</code></pre>
+          <button type="button" class="copy" data-copy="install-commands" hidden>Copy</button>
+        </div>
+        <p>Then, in the app:</p>
+        <ol class="steps">
+          <li>Open <strong>Imports</strong>, choose <strong>Add folders…</strong>, and then <strong>Build previews</strong>.</li>
+          <li>Use <strong>Locations</strong> to connect archive folders or a mounted cloud drive.</li>
+          <li>Open <strong>AI Search</strong>, choose a search engine, and build its index.</li>
+        </ol>
+        <p>The <a href="https://github.com/Audiofool934/latent#getting-started">README</a> covers the Gemini API key, on-device search, and the command line.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <p>Latent is open source under the <a href="https://github.com/Audiofool934/latent/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    <p>Photographs © Audiofool. They are not covered by the Apache License.</p>
+  </footer>
+
+  <dialog class="viewer" data-viewer aria-labelledby="viewer-title">
+    <div class="viewer-frame" data-viewer-frame tabindex="-1">
+      <img class="viewer-image" data-viewer-image alt="">
+    </div>
+    <div class="viewer-bar">
+      <div class="viewer-info">
+        <h3 id="viewer-title" data-viewer-title></h3>
+        <p data-viewer-meta></p>
+        <p data-viewer-exposure></p>
+      </div>
+      <p class="viewer-score" data-viewer-score></p>
+      <div class="viewer-actions">
+        <button type="button" class="icon-button" data-viewer-step="-1" aria-label="Previous photo" title="Previous (W)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
+        </button>
+        <button type="button" class="icon-button" data-viewer-step="1" aria-label="Next photo" title="Next (E)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+        </button>
+        <button type="button" class="pill-button" data-viewer-similar>Similar photos</button>
+        <button type="button" class="icon-button" data-viewer-close aria-label="Close" title="Close (Space)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+        </button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

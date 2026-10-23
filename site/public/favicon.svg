@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="112 112 800 800">
+<style>path{fill:#141414}@media (prefers-color-scheme:dark){path{fill:#e6e6e6}}</style>
+<path fill-rule="evenodd" d="M 128 512 A 384 384 0 1 0 896 512 A 384 384 0 1 0 128 512 Z M 216 534 A 318 318 0 1 0 852 534 A 318 318 0 1 0 216 534 Z"/>
+<path fill-rule="evenodd" d="M 335 572 A 237 237 0 1 0 809 572 A 237 237 0 1 0 335 572 Z M 445 607 A 162 162 0 1 0 769 607 A 162 162 0 1 0 445 607 Z"/>
+</svg>

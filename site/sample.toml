@@ -1,0 +1,72 @@
+# The sample archive on the project page.
+# site/prepare.py reads this file, finds each photo in the folder it is given,
+# and ranks every photo for every search with Latent's on-device engine.
+
+# The search the page opens with.
+first = "cold and quiet"
+
+# The photo cropped for link previews.
+link_preview = "DSC09685"
+
+# Each search runs exactly as typed. A query that is not in English has its language
+# and a note that explains it.
+[[searches]]
+text = "cold and quiet"
+
+[[searches]]
+text = "fog over the hills"
+
+[[searches]]
+text = "a city at night"
+
+[[searches]]
+text = "the sun low over water"
+
+[[searches]]
+text = "trees without leaves"
+
+[[searches]]
+text = "power lines"
+
+[[searches]]
+text = "harvest"
+
+[[searches]]
+text = "un gato"
+lang = "es"
+note = "Spanish for a cat"
+
+[[searches]]
+text = "花火"
+lang = "ja"
+note = "Japanese for fireworks"
+
+[[searches]]
+text = "夜空"
+lang = "zh"
+note = "Chinese for the night sky"
+
+# Photographs by Audiofool, with a description of each for screen readers.
+# A photo is found by this name, with or without DxO's _DxO suffix.
+[photos]
+DSC00261 = "Wind turbines along a green ridge, with a rock outcrop and grazing cattle in front"
+DSC00294 = "A low sun over a frozen lake, with a crack in the ice running toward the horizon"
+DSC00392 = "Tire tracks crossing a frozen lake under a heavy grey sky"
+DSC00395 = "Bare trees frozen into lake ice, with the sun low behind haze"
+DSC00417 = "A pale red sun above a nest on a tall metal stand, with reeds and pylons beyond"
+DSC00687 = "An electricity pylon against a golden, cloudy sky, with wires crossing the frame"
+DSC00691 = "The Milky Way above a lone lit tree at night"
+DSC01345 = "A long cable-stayed bridge crossing the sea at sunset"
+DSC01379 = "Rooftops of an old city at blue hour, with a lit street and church spires"
+DSC02860 = "Ripe rice heads in warm side light"
+DSC03332 = "An old wall following mountain ridges at dusk"
+DSC04549 = "A boat with red sails in front of a lit harbour skyline at night"
+DSC04983 = "A figure dancing on a beach in front of a red sun setting over the sea"
+DSC06794 = "Fireworks bursting over a harbour city at night"
+DSC07877 = "A spotted orange butterfly feeding on a purple thistle"
+DSC08150 = "A white cat sitting among autumn leaves on a rocky slope"
+DSC08413 = "A city of towers at night, half covered by low cloud, seen from high above"
+DSC08962 = "Looking up through green leaves and yellow autumn foliage at bare branches"
+DSC09033 = "A pavilion on a stone bridge in snow and mist"
+DSC09210 = "Four figures leaning down a sloped bank toward glittering blue water at night"
+DSC09685 = "Wind turbines on a hill above a pine forest, with fog spilling over the ridge"
