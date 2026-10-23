@@ -831,3 +831,200 @@ def test_http_folder_scan_answers_at_once_and_keeps_locations_responsive(tmp_pat
         server.shutdown()
         server.server_close()
         worker.join(5)
+
+
+def jpeg_bytes(size, color="navy"):
+    import io
+
+    output = io.BytesIO()
+    Image.new("RGB", size, color).save(output, format="JPEG", quality=90)
+    return output.getvalue()
+
+
+def fake_arw(path, embedded):
+    """A RAW stand-in: a 1 KiB header, its embedded JPEG preview, then image data never read."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"II*\x00" + b"\x00" * 1020 + embedded + b"\x00" * (3 * 1024 * 1024))
+
+
+def stand_in_exiftool(monkeypatch, embedded):
+    from latent.models import PreviewLocation, ProbeResult
+
+    def probe(self, data, suffix):
+        assert suffix == ".arw"
+        return ProbeResult(
+            PreviewLocation("PreviewImage", 1024, len(embedded)),
+            {"DateTimeOriginal": "2026:08:29 16:05:00", "Model": "ILCE-7RM5", "Orientation": 1},
+        )
+
+    monkeypatch.setattr("latent.preview.ExifToolProbe.probe", probe)
+
+
+def test_raw_jpeg_pairs_become_one_photo_and_archive_together(tmp_path, monkeypatch):
+    embedded = jpeg_bytes((1616, 1080))
+    stand_in_exiftool(monkeypatch, embedded)
+    camera = tmp_path / "r5"
+    fake_arw(camera / "DSC00001.ARW", embedded)
+    photo(camera / "DSC00001.JPG", "gold")
+    (camera / "DSC00001.ARW.dop").write_text("edits")
+    # A JPEG without a RAW of the same name stays its own photo.
+    photo(camera / "DSC00002.jpg", "navy")
+    output = tmp_path / "archive"
+    output.mkdir()
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    manager = ImportManager(locations)
+    try:
+        batch = prepared(manager, [str(camera)])
+        counts = (batch["photo_count"], batch["paired_count"], batch["sidecar_count"])
+        assert counts == (2, 1, 1)
+        ready = action(manager, batch, "start")
+        assert ready["preview_ready"] == 2 and ready["preview_failed"] == 0, ready["failures"]
+        with StateStore(locations.state_dir) as store:
+            names = sorted(row[0] for row in store.connection.execute("SELECT name FROM assets"))
+        assert names == ["DSC00001.ARW", "DSC00002.jpg"]
+        action(manager, batch, "destination", str(output))
+        archived = action(manager, batch, "archive")
+        assert archived["status"] == "archived" and archived["archived"] == 4, archived
+        # The camera's JPEG follows its RAW's capture date and name, not its own EXIF.
+        shot = output / "2026/2026-08-29/r5"
+        assert sorted(p.name for p in shot.iterdir()) == [
+            "DSC00001.ARW",
+            "DSC00001.ARW.dop",
+            "DSC00001.JPG",
+        ]
+        assert (shot / "DSC00001.JPG").read_bytes() == (camera / "DSC00001.JPG").read_bytes()
+        assert (output / "2026/2026-10-05/r5/DSC00002.jpg").is_file()
+    finally:
+        manager.close()
+
+
+def test_cloud_folder_previews_read_only_bounded_ranges_and_cloud_previews(
+    tmp_path, monkeypatch
+):
+    from pathlib import PurePosixPath
+
+    from latent.models import RemoteAsset
+
+    embedded = jpeg_bytes((1616, 1080))
+    stand_in_exiftool(monkeypatch, embedded)
+    mount = tmp_path / "CloudDrive" / "Photography"
+    day = mount / "2026-08-29"
+    fake_arw(day / "DSC00001.ARW", embedded)
+    photo(day / "DSC00001.JPG", "gold")
+    standalone = day / "IMG_0001.JPG"
+    exif = Image.Exif()
+    exif[34665] = {36867: "2026:08:29 18:00:00"}
+    # Noise keeps this JPEG larger than the 64 KiB header read.
+    Image.frombytes("RGB", (400, 300), os.urandom(400 * 300 * 3)).save(
+        standalone, exif=exif, quality=95
+    )
+    cloud = {
+        "mount_point": str(tmp_path / "CloudDrive"),
+        "source_root": "/aDrive",
+        "remote_path": "/aDrive/Photography",
+        "remote_id": "folder-1",
+    }
+    monkeypatch.setattr(
+        "latent.locations._cloud_folder_identity",
+        lambda path: dict(cloud) if path == mount.resolve() else None,
+    )
+    reads = []
+    display_preview = jpeg_bytes((640, 427), "gold")
+
+    class FakeCloudFile:
+        """CloudDrive's API: exact ranges from the cloud copy and a display-ready preview."""
+
+        def __init__(self, remote_path):
+            self.local = mount.resolve() / PurePosixPath(remote_path).relative_to(
+                cloud["remote_path"]
+            )
+            self.asset = RemoteAsset(
+                provider="cloud",
+                remote_id=remote_path,
+                remote_path=remote_path,
+                name=self.local.name,
+                size_bytes=self.local.stat().st_size,
+                write_time="2026-08-29T10:00:00+00:00",
+                file_hashes={},
+            )
+            self.range_requests = self.bytes_transferred = self.metadata_elapsed_ms = 0
+
+        def read_range(self, start, length):
+            reads.append((self.local.name, "range", length))
+            self.range_requests += 1
+            self.bytes_transferred += length
+            return self.local.read_bytes()[start : start + length]
+
+        def read_preview(self, maximum_bytes):
+            reads.append((self.local.name, "preview", len(display_preview)))
+            self.bytes_transferred += len(display_preview)
+            return display_preview
+
+    def through_the_mount(*_):
+        raise AssertionError("a cloud original was read through the mount")
+
+    monkeypatch.setattr("latent.filesystem.CloudDriveRangeSource", FakeCloudFile)
+    monkeypatch.setattr("latent.filesystem.FilesystemRangeSource.read_range", through_the_mount)
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    manager = ImportManager(locations)
+    try:
+        batch = prepared(manager, [str(mount)])
+        assert (batch["photo_count"], batch["paired_count"]) == (2, 1)
+        ready = action(manager, batch, "start")
+        assert ready["preview_ready"] == 2 and ready["preview_failed"] == 0, ready["failures"]
+        by_file = {}
+        for name, kind, size in reads:
+            by_file.setdefault(name, []).append((kind, size))
+        assert "DSC00001.JPG" not in by_file
+        raw = by_file["DSC00001.ARW"]
+        assert {kind for kind, _ in raw} == {"range"}
+        assert sum(size for _, size in raw) <= 512 * 1024 < (day / "DSC00001.ARW").stat().st_size
+        header, preview = by_file["IMG_0001.JPG"]
+        assert header == ("range", 64 * 1024) and preview[0] == "preview"
+        assert header[1] < standalone.stat().st_size
+    finally:
+        manager.close()
+
+
+def test_video_thumbnails_and_dxo_exports_are_archived_but_not_shown(tmp_path, monkeypatch):
+    embedded = jpeg_bytes((1616, 1080))
+    stand_in_exiftool(monkeypatch, embedded)
+    camera = tmp_path / "r5"
+    fake_arw(camera / "DSC00001.ARW", embedded)
+    photo(camera / "DSC00001_DxO.jpg", "gold")
+    Image.new("RGB", (90, 60), "gold").save(camera / "DSC00009_DxO_1.TIF")
+    photo(camera / "C0423T01.JPG", "gold")
+    (camera / "C0423.MP4").write_bytes(b"video")
+    photo(camera / "DSC00002.jpg", "navy")
+    # Time-lapse frames are camera originals and stay photos.
+    photo(camera / "颐和园日落-延时" / "DSC05150.JPG", "navy")
+    output = tmp_path / "archive"
+    output.mkdir()
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    manager = ImportManager(locations)
+    try:
+        batch = prepared(manager, [str(camera)])
+        assert (batch["photo_count"], batch["derivative_count"], batch["other_count"]) == (3, 3, 1)
+        ready = action(manager, batch, "start")
+        assert ready["preview_ready"] == 3 and ready["preview_failed"] == 0, ready["failures"]
+        with StateStore(locations.state_dir) as store:
+            names = sorted(row[0] for row in store.connection.execute("SELECT name FROM assets"))
+        assert names == ["DSC00001.ARW", "DSC00002.jpg", "DSC05150.JPG"]
+        action(manager, batch, "destination", str(output))
+        archived = action(manager, batch, "archive")
+        assert archived["status"] == "archived" and archived["archived"] == 7, archived
+        archived_files = sorted(
+            p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()
+        )
+        assert archived_files == [
+            # A DxO export follows its RAW; one without a RAW has no date to follow.
+            "2026/2026-08-29/r5/DSC00001.ARW",
+            "2026/2026-08-29/r5/DSC00001_DxO.jpg",
+            "2026/2026-10-05/r5/DSC00002.jpg",
+            "2026/2026-10-05/r5/颐和园日落-延时/DSC05150.JPG",
+            "Undated/r5/C0423.MP4",
+            "Undated/r5/C0423T01.JPG",
+            "Undated/r5/DSC00009_DxO_1.TIF",
+        ]
+    finally:
+        manager.close()

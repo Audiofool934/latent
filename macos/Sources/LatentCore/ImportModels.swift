@@ -49,6 +49,10 @@ public struct PhotoImport: Decodable, Identifiable, Sendable {
     /// Folder scan progress; older services finish the scan before they answer and omit it.
     public let scannedFiles: Int?
     public let scannedPhotos: Int?
+    /// Camera JPEGs shown through their same-named RAW; older services count them as photos.
+    public let pairedCount: Int?
+    /// Video thumbnails and DxO exports, archived but not shown as photos.
+    public let derivativeCount: Int?
 
     public var title: String { sources.map(\.name).joined(separator: " + ") }
     public var scanning: Bool { ["scanning", "canceling"].contains(status) }

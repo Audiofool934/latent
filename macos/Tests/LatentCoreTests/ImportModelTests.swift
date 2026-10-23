@@ -48,5 +48,12 @@ private func batch(_ json: String) throws -> PhotoImport {
         .replacingOccurrences(of: "\"scanned_files\":2,\"scanned_photos\":1,", with: "")
         .replacingOccurrences(of: "\"scanning\"", with: "\"prepared\""))
     #expect(older.scannedFiles == nil && older.scannedPhotos == nil)
+    #expect(older.pairedCount == nil && older.derivativeCount == nil)
     #expect(!older.scanning && !older.active && older.label == "Ready to import")
+}
+
+@Test func cameraJPEGsPairedWithARAWAreCountedApartFromPhotos() throws {
+    let paired = try batch(scanningJSON.replacingOccurrences(
+        of: "\"sidecar_count\":0,", with: "\"sidecar_count\":0,\"paired_count\":3,\"derivative_count\":2,"))
+    #expect(paired.pairedCount == 3 && paired.derivativeCount == 2 && paired.photoCount == 0)
 }

@@ -52,8 +52,9 @@ New photos can be browsed and organized immediately after their previews are rea
 Gemini semantic-search coverage is separate: `embedding-sync` prepares the local queue, and `embedding-build` uploads contact previews and incurs the configured provider's charges.
 The existing embedding commands remain incremental and do not re-encode successful unchanged RAW entries.
 
-The filesystem **Scan for photos** flow still reads full JPEG files from the selected folder.
-Use this bounded CloudDrive backfill for a large cloud archive.
+**Imports** applies the same-folder RAW pairing and reads CloudDrive-mounted folders through the same bounded API, so cloud JPEGs use the provider preview there too.
+Imports also archives DxO exports and Sony video thumbnails without showing them as photos.
+It keeps time-lapse output and other possible derivatives as photos; use this planner when those need review.
 
 ## Review regular interval shooting
 

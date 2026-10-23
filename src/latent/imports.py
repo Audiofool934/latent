@@ -17,10 +17,17 @@ from uuid import UUID, uuid4
 from .archive_copies import ArchiveCopies
 from .editing import EditingCloud, file_hashes
 from .errors import ConfigurationError
-from .filesystem import FilesystemRangeSource, filesystem_asset
+from .filesystem import filesystem_asset, range_source
 from .folder_output import copy_finished_photo, sha256
 from .folder_output import destination as copy_destination
-from .formats import PHOTO_EXTENSIONS, SIDECAR_EXTENSIONS
+from .formats import (
+    DXO_EXPORT_SUFFIX,
+    JPEG_EXTENSIONS,
+    PHOTO_EXTENSIONS,
+    RAW_PHOTO_EXTENSIONS,
+    SIDECAR_EXTENSIONS,
+    is_derivative,
+)
 from .locations import LocationsStore, check_folder, contained_path, folder_identity, row_asset
 from .preview import PreviewPipeline
 from .sequence_links import filename
@@ -186,6 +193,8 @@ class ImportManager:
             file_count=len(items),
             photo_count=len(photos),
             sidecar_count=sum(i["role"] == "sidecar" for i in items),
+            paired_count=sum(i["role"] == "pair" for i in items),
+            derivative_count=sum(i["role"] == "derivative" for i in items),
             other_count=sum(i["role"] == "other" for i in items),
             bytes_total=sum(i["size_bytes"] for i in items),
             preview_ready=sum(i["preview_state"] == "ready" for i in photos),
@@ -440,6 +449,7 @@ class ImportManager:
                     and not (Path(directory) / n).is_symlink()
                     and not any((Path(directory) / n).is_relative_to(p) for p in exclusions)
                 )
+                included = []
                 for name in sorted(files):
                     self._checkpoint()
                     path = Path(directory) / name
@@ -454,9 +464,21 @@ class ImportManager:
                     info = path.stat()
                     if not path.is_file():
                         continue
-                    ext = path.suffix.lower().lstrip(".")
+                    included.append((path, name, path.suffix.lower().lstrip("."), info))
+                # A camera JPEG beside a RAW of the same name is the same shot; the RAW shows it.
+                raw_stems = {
+                    path.stem.casefold()
+                    for path, _, ext, _ in included
+                    if ext in RAW_PHOTO_EXTENSIONS
+                }
+                for path, name, ext, info in included:
                     role = (
-                        "photo"
+                        "pair"
+                        if ext in JPEG_EXTENSIONS and path.stem.casefold() in raw_stems
+                        else "derivative"
+                        if ext in PHOTO_EXTENSIONS - RAW_PHOTO_EXTENSIONS
+                        and is_derivative(path.stem)
+                        else "photo"
                         if ext in PHOTO_EXTENSIONS
                         else "sidecar"
                         if ext in SIDECAR_EXTENSIONS
@@ -754,7 +776,7 @@ class ImportManager:
                         ).fetchone()
                         if existing and existing["size_bytes"] == asset.size_bytes:
                             asset = row_asset(existing)
-                    result = pipeline.run(FilesystemRangeSource(source, asset), reuse_contact=True)
+                    result = pipeline.run(range_source(source, asset), reuse_contact=True)
                     row = store.connection.execute(
                         "SELECT capture_at FROM assets WHERE id=?", (result.asset_id,)
                     ).fetchone()
@@ -780,13 +802,14 @@ class ImportManager:
 
     @staticmethod
     def _companion(item: dict, items: list[dict]) -> dict | None:
-        if item["role"] != "sidecar":
+        """The file a sidecar, paired camera JPEG or DxO export is archived beside."""
+        if item["role"] not in {"sidecar", "pair", "derivative"}:
             return None
         relative = PurePosixPath(item["relative"])
         candidates = [
             i
             for i in items
-            if i["role"] == "photo"
+            if i["role"] in ({"photo", "pair"} if item["role"] == "sidecar" else {"photo"})
             and i["source_id"] == item["source_id"]
             and PurePosixPath(i["relative"]).parent == relative.parent
         ]
@@ -794,11 +817,15 @@ class ImportManager:
             return next(
                 (i for i in candidates if i["name"].casefold() == relative.stem.casefold()), None
             )
+        # A DxO export belongs to the original it was exported from; a video thumbnail has none.
+        stem = relative.stem
+        if item["role"] == "derivative":
+            stem = DXO_EXPORT_SUFFIX.sub("", stem)
         return next(
             (
                 i
                 for i in sorted(candidates, key=lambda i: i["extension"] != "arw")
-                if PurePosixPath(i["relative"]).stem.casefold() == relative.stem.casefold()
+                if PurePosixPath(i["relative"]).stem.casefold() == stem.casefold()
             ),
             None,
         )
@@ -809,7 +836,9 @@ class ImportManager:
         if destination is None:
             raise ValueError("Choose an archive destination first")
         root = check_folder(destination)
-        items = sorted(self.files(identifier), key=lambda i: (i["role"] == "sidecar", i["id"]))
+        # Companions are copied after the file whose archived name they follow.
+        order = {"pair": 1, "derivative": 1, "sidecar": 2}
+        items = sorted(self.files(identifier), key=lambda i: (order.get(i["role"], 0), i["id"]))
         cloud = destination.get("cloud")
         with StateStore(self.locations.state_dir) as store:
             for item in items:
@@ -833,11 +862,15 @@ class ImportManager:
                         relative = str(PurePosixPath(prefix) / source["label"] / item["relative"])
                         if companion and companion.get("archive_relative"):
                             original = PurePosixPath(companion["archive_relative"])
-                            relative = (
-                                str(original) + ".dop"
-                                if item["extension"] == "dop"
-                                else str(original.with_suffix(".xmp"))
-                            )
+                            if item["extension"] == "dop":
+                                relative = str(original) + ".dop"
+                            elif item["role"] == "pair":
+                                suffix = PurePosixPath(item["name"]).suffix
+                                relative = str(original.with_suffix(suffix))
+                            elif item["role"] == "derivative":
+                                relative = str(original.parent / item["name"])
+                            else:
+                                relative = str(original.with_suffix(".xmp"))
                         target = (
                             str(contained_path(root, item["archive_relative"]))
                             if item["archive_relative"]

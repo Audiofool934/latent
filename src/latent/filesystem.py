@@ -10,6 +10,7 @@ from .errors import ConfigurationError
 from .formats import PHOTO_EXTENSIONS
 from .locations import check_folder, contained_path, row_asset
 from .models import RemoteAsset
+from .provider import CloudDriveRangeSource, RangeSource
 from .storage import StateStore
 
 SUPPORTED_EXTENSIONS = PHOTO_EXTENSIONS
@@ -72,6 +73,50 @@ class FilesystemRangeSource:
         self.range_requests += 1
         self.bytes_transferred += len(data)
         return data
+
+
+def range_source(source: dict, asset: RemoteAsset) -> RangeSource:
+    """Read a CloudDrive-mounted folder through CloudDrive's API, never through the mount."""
+    if (source.get("folder") or {}).get("cloud"):
+        return CloudFolderRangeSource(source, asset)
+    return FilesystemRangeSource(source, asset)
+
+
+class CloudFolderRangeSource:
+    """Reads a photo in a CloudDrive-mounted folder through CloudDrive's API.
+
+    The photo keeps its Locations identity. Reads are exact byte ranges, and a JPEG uses
+    CloudDrive's display-ready preview, so a preview never needs the whole original.
+    """
+
+    def __init__(self, source: dict, asset: RemoteAsset) -> None:
+        relative = PurePosixPath(asset.remote_path).relative_to(source["logical_root"])
+        self.cloud = CloudDriveRangeSource(
+            str(PurePosixPath(source["folder"]["cloud"]["remote_path"]) / relative)
+        )
+        if self.cloud.asset.size_bytes != asset.size_bytes:
+            raise ConfigurationError(
+                "Original photo changed since indexing. Scan this source again"
+            )
+        self.asset = asset
+
+    @property
+    def range_requests(self) -> int:
+        return self.cloud.range_requests
+
+    @property
+    def bytes_transferred(self) -> int:
+        return self.cloud.bytes_transferred
+
+    @property
+    def metadata_elapsed_ms(self) -> int:
+        return self.cloud.metadata_elapsed_ms
+
+    def read_range(self, start: int, length: int) -> bytes:
+        return self.cloud.read_range(start, length)
+
+    def read_preview(self, maximum_bytes: int) -> bytes:
+        return self.cloud.read_preview(maximum_bytes)
 
 
 class FilesystemEditingSource:

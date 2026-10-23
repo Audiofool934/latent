@@ -30,6 +30,21 @@ Matching local previews, including previews built by the former Locations scanne
 Selecting the same unchanged folders reopens their existing preview batch; new or changed files create a new inventory while reusing matching previews.
 The legacy scan API delegates to the same import worker, which scans the folder and then builds its previews, so its work appears and can be paused in Imports.
 
+A JPEG beside an ARW with the same filename stem, such as `DSC00001.JPG` and `DSC00001.ARW`, is the camera's JPEG of that shot.
+The ARW shows the shot in the library with its embedded preview, and the JPEG gets no separate photo or preview.
+The batch counts these pairs, and the JPEG is still archived with its RAW.
+Sony video thumbnails such as `C0423T01.JPG` and DxO exports such as `DSC00605_DxO.jpg` or `DSC00605_DxO_1.tif` are derived files.
+They get no photo or preview, but they are archived.
+A DxO export is archived beside the RAW it came from; one without its RAW in the folder, and every video thumbnail, goes to `Undated`, as videos do.
+Other JPEGs stay separate photos, including photos in time-lapse folders.
+
+Folders on a CloudDrive mount are read through CloudDrive's API, not through the mount.
+An ARW reads only its header and embedded preview, in exact byte ranges.
+A JPEG reads its EXIF header (64 KiB, expanding to at most 512 KiB) and CloudDrive's display-ready preview (at most 4 MiB).
+If CloudDrive offers no preview, that photo fails with an explicit message and can be retried; it never falls back to downloading the original.
+HEIF, PNG and TIFF files are still read in full.
+Local folders are read directly.
+
 **View photos** opens only that batch's available photos, including while previews are still being generated.
 Ratings, picks, rejection flags, captions and sequences use the same stable photo identities as the rest of the library.
 **Refresh photos** brings newly available previews into the batch gallery without silently changing a selection during review.
@@ -42,7 +57,8 @@ Choose a separate archive folder, review its path and file count, then choose **
 The destination can be a local or external disk, or a mounted CloudDrive folder recognized by the existing Locations integration.
 The layout is `YYYY/YYYY-MM-DD/source-folder/original-relative-path`.
 Photos without a capture date go into `Undated`, with the count shown before confirmation.
-Sidecars follow their associated photo's date and any collision rename.
+Sidecars and paired camera JPEGs follow their associated photo's date and any collision rename.
+DxO exports follow their RAW's date and folder but keep their own names.
 
 Copies never replace a different existing file.
 Local copies are checked by SHA-256; CloudDrive copies additionally require a matching cloud hash and size before they are marked verified.

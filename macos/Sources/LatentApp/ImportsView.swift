@@ -312,6 +312,14 @@ struct ImportsView: View {
                 Text(source.folder.path).font(.caption.monospaced()).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
             }
+            if let paired = batch.pairedCount, paired > 0 {
+                Text("\(paired.formatted()) RAW+JPEG \(paired == 1 ? "pair shows" : "pairs show") as one photo; the JPEGs are archived with their RAW")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let derived = batch.derivativeCount, derived > 0 {
+                Text("\(derived.formatted()) video \(derived == 1 ? "thumbnail or DxO export is" : "thumbnails and DxO exports are") archived but not shown as photos")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if batch.otherCount > 0 || batch.ignored > 0 {
                 Text("\(batch.otherCount.formatted()) other files included · \(batch.ignored.formatted()) hidden or excluded files skipped")
                     .font(.caption).foregroundStyle(.secondary)
