@@ -82,7 +82,8 @@ _EDIT_BATCH_PATH = re.compile(
 _TRASH_PATH = re.compile(r"^/api/trash/([a-f0-9-]+)/(restore|resume)$")
 _TIMELAPSE_PATH = re.compile(r"^/api/timelapse/([a-f0-9]{64})$")
 _IMPORT_PATH = re.compile(
-    r"^/api/imports/([a-f0-9-]+)/(start|resume|pause|destination|archive|retry_previews)$"
+    r"^/api/imports/([a-f0-9-]+)/"
+    r"(start|resume|pause|destination|archive|retry_previews|cancel|remove)$"
 )
 _EMBEDDING_RUN_PATH = re.compile(r"^/api/embedding-runs/([a-f0-9-]+)/(start|resume|pause)$")
 _BACKEND_VALIDATE_PATH = re.compile(r"^/api/search-backends/([a-z0-9-]+)/validate$")
@@ -689,7 +690,10 @@ class LibraryRequestHandler(BaseHTTPRequestHandler):
                         )
                     if parsed.path == "/api/locations":
                         if self.server.imports.busy:
-                            raise ValueError("Pause the active import before changing locations")
+                            raise ValueError(
+                                "Pause the active import, or cancel its folder scan, "
+                                "before changing locations"
+                            )
                         self.server.locations.update(payload)
                     elif parsed.path.endswith("/scan"):
                         self.server.folder_indexer.start(payload["expected_revision"])

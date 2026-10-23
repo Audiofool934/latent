@@ -134,7 +134,11 @@ extension LibraryModel {
         performWorkflow(dataID: dataID) {
             let response = try await self.client.importAction(batch, action: action, dataID: dataID, path: path)
             guard response.dataId == dataID, self.service.identity?.dataId == dataID else { return }
-            if let index = self.photoImports.firstIndex(where: { $0.id == batch.id }) { self.photoImports[index] = response.batch }
+            if response.batch.status == "removed" {
+                self.photoImports.removeAll { $0.id == batch.id }
+            } else if let index = self.photoImports.firstIndex(where: { $0.id == batch.id }) {
+                self.photoImports[index] = response.batch
+            }
         }
     }
 
@@ -237,13 +241,60 @@ struct ImportsView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(model.photoImports) { batch in importCard(batch) }
+                        ForEach(model.photoImports) { batch in
+                            if batch.scanning || batch.scanFailed { scanCard(batch) } else { importCard(batch) }
+                        }
                     }.padding(.trailing, 4)
                 }
             }
             Text("Existing previews are reused. Originals stay in place. AI Search runs only after you review and confirm it.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    /// The service lists folders in the background, so a slow cloud folder never holds this window.
+    private func scanCard(_ batch: PhotoImport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(batch.title).font(.headline)
+                    if batch.scanning {
+                        Text("\((batch.scannedFiles ?? 0).formatted()) files · \((batch.scannedPhotos ?? 0).formatted()) photos found so far")
+                            .font(.callout).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+                Spacer()
+                Text(batch.label).font(.caption).foregroundStyle(batch.scanFailed ? .orange : .secondary)
+            }
+            ForEach(batch.sources, id: \.id) { source in
+                Text(source.folder.path).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+            }
+            if batch.scanning {
+                ProgressView().progressViewStyle(.linear)
+                if !batch.currentPath.isEmpty {
+                    Text("Reading \(batch.currentPath)").font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Text(batch.status == "canceling"
+                     ? "Stopping when the current folder listing returns."
+                     : "Cloud and network folders can take a while to list. You can close Imports while the scan continues.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = batch.error { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
+            HStack {
+                if batch.scanning {
+                    Button("Cancel scan") { model.importAction(batch, action: "cancel") }
+                        .disabled(batch.status == "canceling")
+                } else {
+                    Button("Remove") { model.importAction(batch, action: "remove") }
+                }
+                Spacer()
+            }.buttonStyle(.glass).disabled(!model.workflowWritable)
+        }
+        .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.08)))
     }
 
     private func importCard(_ batch: PhotoImport) -> some View {

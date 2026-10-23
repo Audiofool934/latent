@@ -46,12 +46,20 @@ public struct PhotoImport: Decodable, Identifiable, Sendable {
     public let undated: Int
     public let failures: [ImportFailure]
     public let extensions: [String: Int]
+    /// Folder scan progress; older services finish the scan before they answer and omit it.
+    public let scannedFiles: Int?
+    public let scannedPhotos: Int?
 
     public var title: String { sources.map(\.name).joined(separator: " + ") }
-    public var active: Bool { ["indexing", "archiving", "verifying"].contains(status) }
+    public var scanning: Bool { ["scanning", "canceling"].contains(status) }
+    public var scanFailed: Bool { status == "scan_failed" }
+    public var active: Bool { scanning || ["indexing", "archiving", "verifying"].contains(status) }
     public var previewsFinished: Bool { previewReady + previewFailed + skipped >= photoCount }
     public var label: String {
         switch status {
+        case "scanning": "Scanning folders"
+        case "canceling": "Canceling scan"
+        case "scan_failed": "Scan failed"
         case "prepared": "Ready to import"
         case "indexing": "Building previews"
         case "ready": "Ready to browse"

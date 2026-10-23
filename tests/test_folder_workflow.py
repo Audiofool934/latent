@@ -45,7 +45,7 @@ def scan(locations):
     indexer = FolderIndexer(locations)
     try:
         indexer.start(locations.get()["revision"])
-        # An empty folder completes without starting an import worker.
+        # The import worker scans first; an empty folder completes when that scan finds no photos.
         if indexer.worker is not None:
             join_worker(indexer.worker)
         assert not indexer.busy

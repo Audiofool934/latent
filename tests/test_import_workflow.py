@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -48,8 +50,51 @@ def setup(tmp_path):
     output = tmp_path / "archive"
     output.mkdir()
     manager = ImportManager(locations)
-    batch = manager.prepare(str(uuid4()), [str(p) for p in roots])
+    batch = prepared(manager, [str(p) for p in roots])
     return locations, roots, output, manager, batch
+
+
+def prepared(manager, paths, request_id=None):
+    """Add folders, wait for their background scan, and return the batch the request produced."""
+    request_id = request_id or str(uuid4())
+    manager.prepare(request_id, paths)
+    if manager.worker:
+        join_worker(manager.worker)
+    return manager.get(manager.resolve(request_id))
+
+
+def blocked_walk(monkeypatch, folder_name):
+    """Hold the scan when it reaches one folder, like a slow cloud listing."""
+    entered, release = threading.Event(), threading.Event()
+    walk = os.walk
+
+    def slow(top, *args, **kwargs):
+        if Path(top).name == folder_name:
+            entered.set()
+            assert release.wait(10)
+        yield from walk(top, *args, **kwargs)
+
+    monkeypatch.setattr("latent.imports.os.walk", slow)
+    return entered, release
+
+
+def promptly(function):
+    """Run a call that must not wait for a folder scan."""
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = function()
+        except Exception as error:
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "the call waited for the folder scan"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def action(manager, batch, name, path=None):
@@ -404,6 +449,9 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
         with pytest.raises(HTTPError) as denied:
             request("/api/imports", payload, {"Origin": "https://example.com"})
         assert denied.value.code == 403
+        assert request("/api/imports", payload)["batch"]["status"] == "scanning"
+        join_worker(server.imports.worker)
+        # Repeating the request returns the batch its finished scan produced.
         batch = request("/api/imports", payload)["batch"]
         assert batch["status"] == "prepared"
         assert request("/api/assets")["total"] == 0
@@ -416,14 +464,10 @@ def test_http_import_scope_and_embedding_confirmation(tmp_path):
         assert stale.value.code == 400
         request(f"/api/imports/{batch['id']}/start", action_body)
         join_worker(server.imports.worker)
-        second = request(
-            "/api/imports",
-            {
-                **payload,
-                "request_id": str(uuid4()),
-                "paths": [str(roots[1])],
-            },
-        )["batch"]
+        second_payload = {**payload, "request_id": str(uuid4()), "paths": [str(roots[1])]}
+        request("/api/imports", second_payload)
+        join_worker(server.imports.worker)
+        second = request("/api/imports", second_payload)["batch"]
         request(
             f"/api/imports/{second['id']}/start",
             {**expected, "expected_revision": second["revision"]},
@@ -534,7 +578,7 @@ def test_repeated_folder_selection_reuses_batch_and_binds_each_request(tmp_path)
     locations, roots, _, manager, batch = setup(tmp_path)
     request_id = str(uuid4())
     try:
-        repeated = manager.prepare(request_id, [str(p) for p in reversed(roots)])
+        repeated = prepared(manager, [str(p) for p in reversed(roots)], request_id)
         assert repeated["id"] == batch["id"]
         assert len(manager.batches()) == 1
         assert manager.prepare(request_id, [str(p) for p in reversed(roots)])["id"] == batch["id"]
@@ -542,7 +586,7 @@ def test_repeated_folder_selection_reuses_batch_and_binds_each_request(tmp_path)
             manager.prepare(request_id, [str(roots[0])])
         action(manager, batch, "start")
         photo(roots[0] / "new.jpg")
-        updated = manager.prepare(str(uuid4()), [str(p) for p in roots])
+        updated = prepared(manager, [str(p) for p in roots])
         assert updated["id"] != batch["id"]
         assert updated["photo_count"] == 3 and updated["preview_ready"] == 2
         assert updated["status"] == "prepared"
@@ -559,12 +603,12 @@ def test_missing_contacts_and_changed_originals_are_not_reported_as_reusable(tmp
                 "SELECT relative_path FROM cache_entries WHERE variant='contact' ORDER BY asset_id"
             ).fetchone()[0]
         (locations.state_dir / "cache" / path).unlink()
-        reused = manager.prepare(str(uuid4()), [str(p) for p in roots])
+        reused = prepared(manager, [str(p) for p in roots])
         assert reused["id"] == batch["id"] and reused["preview_ready"] == 1
         assert reused["status"] == "prepared"
         assert action(manager, reused, "start")["preview_ready"] == 2
         photo(roots[0] / "DSC00001.JPG", "red")
-        changed = manager.prepare(str(uuid4()), [str(p) for p in roots])
+        changed = prepared(manager, [str(p) for p in roots])
         assert changed["id"] != batch["id"] and changed["preview_ready"] == 1
     finally:
         manager.close()
@@ -617,12 +661,12 @@ def test_legacy_scan_can_be_paused_and_resumed_through_import_http(tmp_path, mon
         batch = request(
             "/api/imports", {**expected, "request_id": str(uuid4()), "paths": [str(source)]}
         )["batch"]
+        join_worker(server.imports.worker)
         locations = request("/api/locations")
-        legacy = request(
-            "/api/locations/scan", {**expected, "expected_revision": locations["revision"]}
-        )
+        request("/api/locations/scan", {**expected, "expected_revision": locations["revision"]})
         assert entered.wait(3)
-        assert legacy["indexing"]["import_id"] == batch["id"]
+        # The legacy scan reopens the unchanged batch, then builds its previews.
+        assert request("/api/locations")["indexing"]["import_id"] == batch["id"]
         assert server.folder_indexer.imports is server.imports
         preview_worker = server.imports.worker
         body = {**expected, "expected_revision": batch["revision"]}
@@ -638,6 +682,150 @@ def test_legacy_scan_can_be_paused_and_resumed_through_import_http(tmp_path, mon
         complete = request("/api/imports")["batches"][0]
         assert complete["status"] == "ready" and complete["preview_ready"] == 3
         assert request("/api/embedding-runs")["runs"] == []
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        worker.join(5)
+
+
+def test_folder_scan_runs_in_the_background_and_reports_progress(tmp_path, monkeypatch):
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    roots = [tmp_path / "r2", tmp_path / "r5"]
+    for root in roots:
+        photo(root / "DSC00001.JPG")
+        (root / "DSC00001.JPG.dop").write_text("edits")
+    entered, release = blocked_walk(monkeypatch, "r5")
+    manager = ImportManager(locations)
+    try:
+        batch = promptly(lambda: manager.prepare(str(uuid4()), [str(p) for p in roots]))
+        assert batch["status"] == "scanning"
+        assert [source["name"] for source in batch["sources"]] == ["r2", "r5"]
+        assert entered.wait(5)
+        # A slow listing holds neither Locations nor the import list.
+        promptly(locations.get)
+        progress = promptly(lambda: manager.get(batch["id"]))
+        assert (progress["scanned_files"], progress["scanned_photos"]) == (2, 1)
+        assert progress["current_path"] == "r5"
+        with pytest.raises(ValueError, match="Wait for the folder scan"):
+            promptly(lambda: manager.prepare(str(uuid4()), [str(tmp_path / "r2")]))
+        with pytest.raises(ValueError, match="Wait for the folder scan"):
+            manager.action(batch["id"], "start", batch["revision"])
+        release.set()
+        join_worker(manager.worker)
+        done = manager.get(batch["id"])
+        assert done["status"] == "prepared"
+        assert done["photo_count"] == done["sidecar_count"] == 2
+        assert (done["scanned_files"], done["scanned_photos"]) == (4, 2)
+        assert done["current_path"] == "" and not manager.busy
+    finally:
+        release.set()
+        manager.close()
+
+
+def test_canceling_a_folder_scan_discards_its_batch(tmp_path, monkeypatch):
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    camera = tmp_path / "camera"
+    photo(camera / "DSC00001.JPG")
+    entered, release = blocked_walk(monkeypatch, "camera")
+    manager = ImportManager(locations)
+    try:
+        batch = manager.prepare(str(uuid4()), [str(camera)])
+        assert entered.wait(5)
+        canceling = promptly(lambda: manager.action(batch["id"], "cancel", batch["revision"]))
+        assert canceling["status"] == "canceling"
+        release.set()
+        join_worker(manager.worker)
+        assert manager.batches() == [] and not manager.busy
+        assert prepared(manager, [str(camera)])["status"] == "prepared"
+    finally:
+        release.set()
+        manager.close()
+
+
+def test_failed_or_stopped_scans_explain_themselves_and_can_be_removed(tmp_path, monkeypatch):
+    locations = LocationsStore(tmp_path / "workspace", tmp_path / "state")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("no photos here")
+    camera = tmp_path / "camera"
+    photo(camera / "DSC00001.JPG")
+    manager = ImportManager(locations)
+    release = threading.Event()
+    try:
+        failed = prepared(manager, [str(empty)])
+        assert failed["status"] == "scan_failed"
+        assert failed["error"] == "No supported photos were found in these folders"
+        with pytest.raises(ValueError, match="Remove this batch"):
+            manager.action(failed["id"], "start", failed["revision"])
+        assert manager.action(failed["id"], "remove", failed["revision"])["status"] == "removed"
+        assert manager.batches() == []
+
+        entered, release = blocked_walk(monkeypatch, "camera")
+        stopped = manager.prepare(str(uuid4()), [str(camera)])
+        assert entered.wait(5)
+        scan = manager.worker
+        # Quitting must not wait for a slow listing to return.
+        promptly(manager.close)
+        manager = ImportManager(locations)
+        release.set()
+        join_worker(scan)
+        stopped = manager.get(stopped["id"])
+        assert stopped["status"] == "scan_failed"
+        assert "stopped before it finished" in stopped["error"]
+        assert manager.action(stopped["id"], "remove", stopped["revision"])["status"] == "removed"
+        assert manager.batches() == []
+    finally:
+        release.set()
+        manager.close()
+
+
+def test_http_folder_scan_answers_at_once_and_keeps_locations_responsive(tmp_path, monkeypatch):
+    import json
+    from urllib.request import Request, urlopen
+
+    from latent.search import VectorIndex
+    from latent.web_server import LibraryServer
+
+    camera = tmp_path / "camera"
+    photo(camera / "DSC00001.JPG")
+    entered, release = blocked_walk(monkeypatch, "camera")
+    server = LibraryServer(
+        ("127.0.0.1", 0),
+        tmp_path / "state",
+        workspace_dir=tmp_path / "workspace",
+        vector_index=VectorIndex(tmp_path / "vectors", model_id="fixture", dimensions=4),
+    )
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+
+    def request(path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        with urlopen(
+            Request(
+                f"http://127.0.0.1:{server.server_port}" + path,
+                data=data,
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=5,
+        ) as response:
+            return json.load(response)
+
+    try:
+        expected = {"expected_data_id": request("/health")["data_id"]}
+        payload = {**expected, "request_id": str(uuid4()), "paths": [str(camera)]}
+        batch = request("/api/imports", payload)["batch"]
+        assert batch["status"] == "scanning"
+        assert entered.wait(5)
+        # The app reads Locations and the import list while a slow folder is still listing.
+        assert [source["name"] for source in request("/api/locations")["sources"]] == ["camera"]
+        assert request("/api/imports")["batches"][0]["status"] == "scanning"
+        body = {**expected, "expected_revision": batch["revision"]}
+        canceled = request(f"/api/imports/{batch['id']}/cancel", body)["batch"]
+        assert canceled["status"] == "canceling"
+        release.set()
+        join_worker(server.imports.worker)
+        assert request("/api/imports")["batches"] == []
     finally:
         release.set()
         server.shutdown()

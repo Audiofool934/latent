@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-from .imports import ImportManager
+from .imports import NO_PHOTOS, ImportManager
 from .locations import LocationsStore
 from .workspace import write_workspace_export
 
@@ -35,12 +35,20 @@ class FolderIndexer:
         identifier = self.state.get("import_id")
         if identifier is None:
             return dict(self.state)
-        batch = self.imports.get(identifier)
-        status = {
-            "indexing": "scanning",
-            "ready": "complete",
-            "paused": "interrupted",
-        }.get(batch["status"], batch["status"])
+        identifier = self.imports.resolve(identifier)
+        try:
+            batch = self.imports.get(identifier)
+        except KeyError:
+            # A canceled folder scan leaves no batch behind.
+            return {"status": "idle"}
+        if batch["status"] == "scan_failed" and batch["error"] == NO_PHOTOS:
+            status = "complete"
+        else:
+            status = {
+                "indexing": "scanning",
+                "ready": "complete",
+                "paused": "interrupted",
+            }.get(batch["status"], batch["status"])
         return {
             "status": status,
             "import_id": identifier,
@@ -60,34 +68,28 @@ class FolderIndexer:
             source = self.locations.source(data["active_source_id"], data)
             if not source["folder"]:
                 raise ValueError("Connect this archive's mounted folder before importing")
-            try:
-                batch = self.imports.prepare(str(uuid4()), [source["folder"]["path"]])
-            except ValueError as error:
-                if str(error) != "No supported photos were found in these folders":
-                    raise
-                self.state = {
-                    "status": "complete",
-                    "source_id": source["id"],
-                    "discovered": 0,
-                    "indexed": 0,
-                    "failed": 0,
-                    "error": None,
-                }
-                write_workspace_export(self.path, self.state)
-                return self.status()
+            # The import worker scans the folder, then builds its previews.
+            batch = self.imports.prepare(
+                str(uuid4()), [source["folder"]["path"]], start_previews=True
+            )
             self.state = {
                 "status": batch["status"],
                 "source_id": source["id"],
                 "import_id": batch["id"],
             }
             write_workspace_export(self.path, self.state)
-            self.imports.action(batch["id"], "start", batch["revision"])
             return self.status()
 
     def cancel(self) -> dict:
         if identifier := self.state.get("import_id"):
-            batch = self.imports.get(identifier)
-            self.imports.action(identifier, "pause", batch["revision"])
+            try:
+                batch = self.imports.get(self.imports.resolve(identifier))
+            except KeyError:
+                return self.status()
+            if batch["status"] in {"scanning", "canceling"}:
+                self.imports.action(batch["id"], "cancel", batch["revision"])
+            elif batch["status"] != "scan_failed":
+                self.imports.action(batch["id"], "pause", batch["revision"])
         return self.status()
 
     def close(self) -> None:

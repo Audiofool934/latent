@@ -27,6 +27,13 @@ from .sequence_links import filename
 from .storage import CacheManager, StateStore
 from .workspace import utc_now
 
+NO_PHOTOS = "No supported photos were found in these folders"
+SCAN_STOPPED = (
+    "The folder scan stopped before it finished. Remove this batch, then add the folders again"
+)
+# A batch has no inventory until its folder scan finishes.
+SCAN_STATUSES = {"scanning", "canceling", "scan_failed"}
+
 
 class ImportPaused(Exception):
     pass
@@ -55,13 +62,16 @@ class ImportManager:
         self.stop = threading.Event()
         self.worker: threading.Thread | None = None
         self.active_id: str | None = None
+        self.scan_id: str | None = None
         with self._db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS batches (
                     id TEXT PRIMARY KEY, created_at TEXT NOT NULL, revision TEXT NOT NULL,
                     status TEXT NOT NULL, phase TEXT NOT NULL, sources_json TEXT NOT NULL,
                     destination_json TEXT, error TEXT, current_path TEXT NOT NULL DEFAULT '',
-                    ignored INTEGER NOT NULL DEFAULT 0
+                    ignored INTEGER NOT NULL DEFAULT 0,
+                    scanned_files INTEGER NOT NULL DEFAULT 0,
+                    scanned_photos INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES batches(id),
@@ -79,10 +89,23 @@ class ImportManager:
                     paths_json TEXT NOT NULL
                 );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(batches)")}
+            for column in ("scanned_files", "scanned_photos"):
+                if column not in columns:
+                    db.execute(
+                        f"ALTER TABLE batches ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    )
             db.execute(
                 "UPDATE batches SET status='interrupted', "
                 "error='Import interrupted. Resume when the source is available.' "
                 "WHERE status IN ('indexing','archiving','verifying')"
+            )
+            for row in db.execute("SELECT id FROM batches WHERE status='canceling'").fetchall():
+                self._discard(db, row["id"])
+            db.execute(
+                "UPDATE batches SET status='scan_failed',error=?,current_path='' "
+                "WHERE status='scanning'",
+                (SCAN_STOPPED,),
             )
         self.reconcile_cached_previews()
 
@@ -104,7 +127,23 @@ class ImportManager:
     def close(self) -> None:
         self.stop.set()
         if self.worker:
-            self.worker.join(timeout=35)
+            # A restart reports an unfinished scan, so a slow listing must not delay quitting.
+            self.worker.join(timeout=1 if self.scan_id else 35)
+
+    @staticmethod
+    def _discard(db: sqlite3.Connection, identifier: str) -> None:
+        """Delete a batch whose folder scan did not produce an inventory."""
+        db.execute("DELETE FROM import_requests WHERE batch_id=?", (identifier,))
+        db.execute("DELETE FROM files WHERE batch_id=?", (identifier,))
+        db.execute("DELETE FROM batches WHERE id=?", (identifier,))
+
+    def resolve(self, identifier: str) -> str:
+        """The batch a request produced; unchanged folders reopen an earlier batch."""
+        with self._db() as db:
+            row = db.execute(
+                "SELECT batch_id FROM import_requests WHERE id=?", (identifier,)
+            ).fetchone()
+        return row["batch_id"] if row else identifier
 
     def _batch(self, identifier: str) -> dict:
         if not isinstance(identifier, str) or str(UUID(identifier)) != identifier:
@@ -260,14 +299,17 @@ class ImportManager:
         day = (value or "")[:10].replace(":", "-")
         return day if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else None
 
-    def prepare(self, identifier: str, paths: list[str]) -> dict:
+    def prepare(self, identifier: str, paths: list[str], *, start_previews: bool = False) -> dict:
+        """Record the folders, then inventory them on the import worker.
+
+        The batch starts as scanning and becomes prepared once its inventory is complete.
+        With start_previews, the worker goes on to build previews, as the legacy folder scan did.
+        """
         if not paths or len(paths) > 16 or any(not isinstance(p, str) for p in paths):
             raise ValueError("Choose between one and sixteen source folders")
         if str(UUID(identifier)) != identifier:
             raise ValueError("Invalid import ID")
         with self.locations.lock, self.lock:
-            if self.busy:
-                raise ValueError("Pause the active import before adding another batch")
             roots = [folder_identity(path) for path in paths]
             normalized = [r["path"] for r in roots]
             if len(set(normalized)) != len(normalized) or any(
@@ -290,10 +332,13 @@ class ImportManager:
                 if [s["folder"]["path"] for s in existing["sources"]] != normalized:
                     raise ValueError("This import request already refers to different folders")
                 return self.get(identifier)
+            if self.busy:
+                raise ValueError(
+                    "Wait for the folder scan to finish, or cancel it, before adding another batch"
+                    if self.scan_id
+                    else "Pause the active import before adding another batch"
+                )
             sources = []
-            all_files = []
-            ignored = 0
-            archived_paths = self.copies.paths()
             for root in roots:
                 config = self.locations.update(
                     {
@@ -309,111 +354,231 @@ class ImportManager:
             for source in sources:
                 if labels[source["label"].casefold()] > 1:
                     source["label"] += "-" + source["id"][:8]
-                root = check_folder(source["folder"])
-                exclusions = self.locations.exclusions(self.locations.get())
-
-                def walk_error(error):
-                    raise error
-
-                for directory, names, files in os.walk(root, followlinks=False, onerror=walk_error):
-                    names[:] = sorted(
-                        n
-                        for n in names
-                        if not n.startswith((".", "_"))
-                        and n.casefold() != "sequences"
-                        and not (Path(directory) / n).is_symlink()
-                        and not any((Path(directory) / n).is_relative_to(p) for p in exclusions)
-                    )
-                    for name in sorted(files):
-                        path = Path(directory) / name
-                        if (
-                            name.startswith(".")
-                            or path.is_symlink()
-                            or str(path) in archived_paths
-                            or any(path.is_relative_to(p) for p in exclusions)
-                        ):
-                            ignored += 1
-                            continue
-                        info = path.stat()
-                        if not path.is_file():
-                            continue
-                        ext = path.suffix.lower().lstrip(".")
-                        role = (
-                            "photo"
-                            if ext in PHOTO_EXTENSIONS
-                            else "sidecar"
-                            if ext in SIDECAR_EXTENSIONS
-                            else "other"
-                        )
-                        all_files.append(
-                            (
-                                identifier,
-                                source["id"],
-                                path.relative_to(root).as_posix(),
-                                name,
-                                ext,
-                                role,
-                                info.st_size,
-                                info.st_mtime_ns,
-                            )
-                        )
-                        if len(all_files) > 100_000:
-                            raise ValueError(
-                                "Choose a smaller import batch (at most 100,000 files)"
-                            )
-            if not any(item[5] == "photo" for item in all_files):
-                raise ValueError("No supported photos were found in these folders")
-            # The same unchanged folders reopen their existing preview batch.
-            # New or changed files produce a new, frozen inventory.
-            source_ids = {source["id"] for source in sources}
-            inventory = {tuple(item[1:]) for item in all_files}
-            for previous in self.batches():
-                if previous["phase"] != "preview" or previous["destination"] is not None:
-                    continue
-                if {source["id"] for source in previous["sources"]} != source_ids:
-                    continue
-                prior_inventory = {
-                    tuple(
-                        item[key]
-                        for key in (
-                            "source_id",
-                            "relative",
-                            "name",
-                            "extension",
-                            "role",
-                            "size_bytes",
-                            "mtime_ns",
-                        )
-                    )
-                    for item in self.files(previous["id"])
-                }
-                if prior_inventory == inventory:
-                    with self._db() as db:
-                        db.execute(
-                            "INSERT INTO import_requests(id,batch_id,paths_json) VALUES (?,?,?)",
-                            (identifier, previous["id"], json.dumps(normalized)),
-                        )
-                    self._reuse_cached_previews(previous["id"])
-                    return self.get(previous["id"])
+            exclusions = self.locations.exclusions(self.locations.get())
             with self._db() as db:
                 db.execute(
-                    "INSERT INTO batches(id,created_at,revision,status,phase,sources_json,ignored) "
-                    "VALUES (?,?,?,'prepared','preview',?,?)",
-                    (identifier, utc_now(), str(uuid4()), json.dumps(sources), ignored),
+                    "INSERT INTO batches(id,created_at,revision,status,phase,sources_json) "
+                    "VALUES (?,?,?,'scanning','preview',?)",
+                    (identifier, utc_now(), str(uuid4()), json.dumps(sources)),
                 )
-                db.executemany(
-                    "INSERT INTO files(batch_id,source_id,relative,name,extension,role,"
-                    "size_bytes,mtime_ns) VALUES (?,?,?,?,?,?,?,?)",
-                    all_files,
+                db.execute(
+                    "INSERT INTO import_requests(id,batch_id,paths_json) VALUES (?,?,?)",
+                    (identifier, identifier, json.dumps(normalized)),
                 )
-            self._reuse_cached_previews(identifier)
+            self.stop.clear()
+            self.active_id = self.scan_id = identifier
+            self.worker = threading.Thread(
+                target=self._scan,
+                args=(identifier, sources, exclusions, start_previews),
+                name="latent-import-scan",
+                daemon=True,
+            )
+            self.worker.start()
             return self.get(identifier)
+
+    def _scan(
+        self, identifier: str, sources: list[dict], exclusions: list[Path], start_previews: bool
+    ) -> None:
+        target = None
+        try:
+            files, ignored = self._inventory(identifier, sources, exclusions)
+            with self.lock:
+                self._checkpoint()
+                target = self._record_inventory(identifier, sources, files, ignored)
+                self.scan_id = None
+                if start_previews:
+                    self.active_id = target
+                    self._update(
+                        target, phase="preview", status="indexing", error=None, current_path=""
+                    )
+        except ImportPaused:
+            self._end_scan(identifier)
+        except Exception as error:
+            self._update(identifier, status="scan_failed", error=str(error), current_path="")
+        finally:
+            self.scan_id = None
+            if target is None or not start_previews:
+                self.active_id = None
+        if target is not None and start_previews:
+            self._run(target, "preview")
+
+    def _inventory(
+        self, identifier: str, sources: list[dict], exclusions: list[Path]
+    ) -> tuple[list[tuple], int]:
+        """List the source folders without holding a lock; a slow cloud listing waits only here."""
+        all_files = []
+        ignored = photos = 0
+        archived_paths = self.copies.paths()
+        reported = 0.0
+
+        def report(folder: str, *, force: bool = False) -> None:
+            nonlocal reported
+            if force or time.monotonic() - reported >= 0.5:
+                reported = time.monotonic()
+                self._update(
+                    identifier,
+                    scanned_files=len(all_files),
+                    scanned_photos=photos,
+                    current_path=folder,
+                )
+
+        def walk_error(error):
+            raise error
+
+        for source in sources:
+            report(source["name"], force=True)
+            root = check_folder(source["folder"])
+            for directory, names, files in os.walk(root, followlinks=False, onerror=walk_error):
+                self._checkpoint()
+                folder = str(PurePosixPath(source["name"]) / Path(directory).relative_to(root))
+                report(folder, force=True)
+                names[:] = sorted(
+                    n
+                    for n in names
+                    if not n.startswith((".", "_"))
+                    and n.casefold() != "sequences"
+                    and not (Path(directory) / n).is_symlink()
+                    and not any((Path(directory) / n).is_relative_to(p) for p in exclusions)
+                )
+                for name in sorted(files):
+                    self._checkpoint()
+                    path = Path(directory) / name
+                    if (
+                        name.startswith(".")
+                        or path.is_symlink()
+                        or str(path) in archived_paths
+                        or any(path.is_relative_to(p) for p in exclusions)
+                    ):
+                        ignored += 1
+                        continue
+                    info = path.stat()
+                    if not path.is_file():
+                        continue
+                    ext = path.suffix.lower().lstrip(".")
+                    role = (
+                        "photo"
+                        if ext in PHOTO_EXTENSIONS
+                        else "sidecar"
+                        if ext in SIDECAR_EXTENSIONS
+                        else "other"
+                    )
+                    if role == "photo":
+                        photos += 1
+                    all_files.append(
+                        (
+                            identifier,
+                            source["id"],
+                            path.relative_to(root).as_posix(),
+                            name,
+                            ext,
+                            role,
+                            info.st_size,
+                            info.st_mtime_ns,
+                        )
+                    )
+                    if len(all_files) > 100_000:
+                        raise ValueError("Choose a smaller import batch (at most 100,000 files)")
+                    report(folder)
+        if not photos:
+            raise ValueError(NO_PHOTOS)
+        return all_files, ignored
+
+    def _record_inventory(
+        self, identifier: str, sources: list[dict], files: list[tuple], ignored: int
+    ) -> str:
+        """Freeze a finished scan. Unchanged folders reopen their earlier preview batch."""
+        source_ids = {source["id"] for source in sources}
+        inventory = {tuple(item[1:]) for item in files}
+        for previous in self.batches():
+            if (
+                previous["id"] == identifier
+                or previous["status"] in SCAN_STATUSES
+                or previous["phase"] != "preview"
+                or previous["destination"] is not None
+            ):
+                continue
+            if {source["id"] for source in previous["sources"]} != source_ids:
+                continue
+            prior_inventory = {
+                tuple(
+                    item[key]
+                    for key in (
+                        "source_id",
+                        "relative",
+                        "name",
+                        "extension",
+                        "role",
+                        "size_bytes",
+                        "mtime_ns",
+                    )
+                )
+                for item in self.files(previous["id"])
+            }
+            if prior_inventory == inventory:
+                with self._db() as db:
+                    db.execute(
+                        "UPDATE import_requests SET batch_id=? WHERE id=?",
+                        (previous["id"], identifier),
+                    )
+                    self._discard(db, identifier)
+                self._reuse_cached_previews(previous["id"])
+                return previous["id"]
+        with self._db() as db:
+            db.execute(
+                "UPDATE batches SET status='prepared',ignored=?,current_path='',"
+                "scanned_files=?,scanned_photos=? WHERE id=?",
+                (ignored, len(files), sum(item[5] == "photo" for item in files), identifier),
+            )
+            db.executemany(
+                "INSERT INTO files(batch_id,source_id,relative,name,extension,role,"
+                "size_bytes,mtime_ns) VALUES (?,?,?,?,?,?,?,?)",
+                files,
+            )
+        self._reuse_cached_previews(identifier)
+        return identifier
+
+    def _end_scan(self, identifier: str) -> None:
+        """A canceled scan leaves nothing behind; a scan stopped by quitting explains itself."""
+        with self.lock, self._db() as db:
+            row = db.execute("SELECT status FROM batches WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                return
+            if row["status"] == "canceling":
+                self._discard(db, identifier)
+            else:
+                db.execute(
+                    "UPDATE batches SET status='scan_failed',error=?,current_path='' WHERE id=?",
+                    (SCAN_STOPPED, identifier),
+                )
+
+    def _scan_action(self, batch: dict, action: str) -> dict:
+        identifier = batch["id"]
+        if batch["status"] == "scan_failed":
+            if action != "remove":
+                raise ValueError(
+                    "This folder scan did not finish. Remove this batch, then add the folders again"
+                )
+        elif action != "cancel":
+            raise ValueError("Wait for the folder scan to finish, or cancel it")
+        elif self.scan_id == identifier and self.busy:
+            self._update(identifier, status="canceling")
+            self.stop.set()
+            return self.get(identifier)
+        # No worker holds this batch any more, so remove it here.
+        removed = self.get(identifier)
+        with self._db() as db:
+            self._discard(db, identifier)
+        return {**removed, "status": "removed"}
 
     def action(self, identifier: str, action: str, revision: str, path: str | None = None) -> dict:
         with self.lock:
             batch = self._batch(identifier)
             if batch["revision"] != revision:
                 raise ValueError("Import settings changed. Refresh the batch before continuing")
+            if batch["status"] in SCAN_STATUSES:
+                return self._scan_action(batch, action)
+            if action in {"cancel", "remove"}:
+                raise ValueError("Only a folder scan can be canceled or removed")
             if action == "pause":
                 if self.active_id == identifier:
                     self.stop.set()
@@ -421,7 +586,12 @@ class ImportManager:
             if self.busy:
                 if self.active_id == identifier and action in {"start", "resume"}:
                     return self.get(identifier)
-                raise ValueError("Pause the current import before starting another operation")
+                raise ValueError(
+                    "Wait for the folder scan to finish, or cancel it, before starting another "
+                    "operation"
+                    if self.scan_id
+                    else "Pause the current import before starting another operation"
+                )
             if action == "destination":
                 if not isinstance(path, str):
                     raise ValueError("Choose an archive destination folder")
@@ -481,33 +651,34 @@ class ImportManager:
                 error=None,
                 current_path="",
             )
-
-            def run():
-                try:
-                    if phase == "preview":
-                        self._previews(identifier)
-                        self.reconcile_cached_previews()
-                    else:
-                        self._archive(identifier)
-                except ImportPaused:
-                    self._update(identifier, status="paused", error=None, current_path="")
-                except CloudConfirmationPending:
-                    self._update(
-                        identifier,
-                        status="waiting_for_cloud",
-                        error=(
-                            "The copy is saved, but cloud confirmation is still pending. "
-                            "Resume to verify it."
-                        ),
-                    )
-                except Exception as error:
-                    self._update(identifier, status="needs_attention", error=str(error))
-                finally:
-                    self.active_id = None
-
-            self.worker = threading.Thread(target=run, name="latent-import", daemon=True)
+            self.worker = threading.Thread(
+                target=self._run, args=(identifier, phase), name="latent-import", daemon=True
+            )
             self.worker.start()
             return self.get(identifier)
+
+    def _run(self, identifier: str, phase: str) -> None:
+        try:
+            if phase == "preview":
+                self._previews(identifier)
+                self.reconcile_cached_previews()
+            else:
+                self._archive(identifier)
+        except ImportPaused:
+            self._update(identifier, status="paused", error=None, current_path="")
+        except CloudConfirmationPending:
+            self._update(
+                identifier,
+                status="waiting_for_cloud",
+                error=(
+                    "The copy is saved, but cloud confirmation is still pending. "
+                    "Resume to verify it."
+                ),
+            )
+        except Exception as error:
+            self._update(identifier, status="needs_attention", error=str(error))
+        finally:
+            self.active_id = None
 
     def _checkpoint(self) -> None:
         if self.stop.is_set():

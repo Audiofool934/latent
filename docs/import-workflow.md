@@ -10,11 +10,25 @@ Its **Open Imports** button leads to the single place for adding photo folders a
 
 Select one or more camera folders in **Add folders**, then choose **Build previews**.
 The batch records its source folders and file inventory before starting.
+
+### Folder scan
+
+The inventory is built by a folder scan in the service, so **Add folders** returns at once.
+A cloud or network folder can take minutes to list; the batch shows the folder being read and the files and photos found so far.
+The scan holds no Locations lock, so Locations and the import list stay readable while it runs.
+Other imports and Locations changes wait until the scan finishes or is canceled.
+**Cancel scan** discards the batch after the current folder listing returns; the chosen folders stay in Locations.
+A scan that finds no supported photos, exceeds 100,000 files, or cannot read a folder ends as **Scan failed** with the reason.
+Quitting Latent stops a scan, and the next launch reports it as stopped.
+Choose **Remove** for a failed or stopped scan, then add the folders again.
+
+### Previews
+
 ARW, JPEG, HEIF/HIF, PNG and TIFF receive local previews; DOP and XMP files are kept with their originals for archiving.
 HEIF decoding uses macOS ImageIO through `sips`, and ExifTool preserves capture metadata.
 Matching local previews, including previews built by the former Locations scanner, are reused and counted in the batch.
 Selecting the same unchanged folders reopens their existing preview batch; new or changed files create a new inventory while reusing matching previews.
-The legacy scan API delegates to the same import worker, so its work appears and can be paused in Imports.
+The legacy scan API delegates to the same import worker, which scans the folder and then builds its previews, so its work appears and can be paused in Imports.
 
 **View photos** opens only that batch's available photos, including while previews are still being generated.
 Ratings, picks, rejection flags, captions and sequences use the same stable photo identities as the rest of the library.
@@ -61,6 +75,6 @@ Verified copy receipts are stored in the catalog's `archive-copies.sqlite`.
 Embedding plans and progress are stored under `workspace/embedding-runs/<request-id>/`.
 All mutations require the current library identity; actions also require the reviewed batch or plan revision.
 
-`tests/test_import_workflow.py` covers two-camera imports, collision names and sidecars, pause/restart recovery, cloud confirmation backpressure, source changes, hidden photos, offline archive editing, scoped embeddings and HTTP request boundaries.
+`tests/test_import_workflow.py` covers two-camera imports, background folder scans with progress, cancellation and restart reporting, collision names and sidecars, pause/restart recovery, cloud confirmation backpressure, source changes, hidden photos, offline archive editing, scoped embeddings and HTTP request boundaries.
 Native UI verification uses a separate catalog, workspace, settings suite and app bundle, with real RAW, JPEG and HIF samples copied into the test directory.
 Actual cloud transfer must be verified against the intended mounted destination; a passing fake-provider test is not evidence that a real upload completed.
