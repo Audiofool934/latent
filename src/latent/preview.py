@@ -233,18 +233,20 @@ class PreviewPipeline:
         elif asset.extension in HEIF_EXTENSIONS:
             if asset.size_bytes > 128 * MIB:
                 raise ConfigurationError("This image exceeds the 128 MB preview input limit")
-            original = source.read_range(0, asset.size_bytes)
-            if len(original) != asset.size_bytes:
-                raise PreviewDecodeError("The HEIF original could not be read completely")
+            original = self._read_complete_original(source, label="HEIF")
             embedded, metadata = decode_heif(original, asset.extension)
             probe_result = ProbeResult(
                 PreviewLocation("HEIFImage", 0, len(embedded)), metadata
             )
             display_ready = True
         else:
-            if asset.size_bytes > 128 * MIB:
-                raise ConfigurationError("This image exceeds the 128 MB preview input limit")
-            prefix = source.read_range(0, asset.size_bytes)
+            # Large edited PNGs need full decoding; keep that input bounded independently of RAW.
+            input_limit_mib = 256 if asset.extension == "png" else 128
+            if asset.size_bytes > input_limit_mib * MIB:
+                raise ConfigurationError(
+                    f"This image exceeds the {input_limit_mib} MB preview input limit"
+                )
+            prefix = self._read_complete_original(source)
             with Image.open(io.BytesIO(prefix)) as original:
                 metadata = _image_metadata(original)
             probe_result = ProbeResult(PreviewLocation("OriginalImage", 0, len(prefix)), metadata)
@@ -304,6 +306,18 @@ class PreviewPipeline:
         )
         self.store.record_fetch(result, started_at)
         return result
+
+    @staticmethod
+    def _read_complete_original(source: RangeSource, *, label: str = "image") -> bytes:
+        """Avoid large cloud ranges while retaining the complete bounded original."""
+        chunks = []
+        for offset in range(0, source.asset.size_bytes, 4 * MIB):
+            length = min(4 * MIB, source.asset.size_bytes - offset)
+            chunk = source.read_range(offset, length)
+            if len(chunk) != length:
+                raise PreviewDecodeError(f"The {label} original could not be read completely")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     @staticmethod
     def _read_jpeg_metadata(source: RangeSource) -> dict[str, Any]:

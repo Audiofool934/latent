@@ -4,8 +4,10 @@ import io
 import json
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+from latent.errors import ConfigurationError, PreviewDecodeError
 from latent.models import PreviewLocation, ProbeResult, RemoteAsset
 from latent.preview import PreviewPipeline
 from latent.provider import MemoryRangeSource
@@ -47,6 +49,211 @@ def make_asset(name: str, body: bytes, *, remote_id: str = "asset-1") -> RemoteA
         write_time="2026-08-29T08:05:00+00:00",
         file_hashes={"2": remote_id},
     )
+
+
+def test_large_png_decodes_within_its_bounded_limit_and_keeps_metadata(tmp_path, monkeypatch):
+    # Scale byte limits down while exercising the same boundary and real PNG decoder.
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+    image = Image.new("RGB", (90, 60), "navy")
+    exif = Image.Exif()
+    exif[272] = "Original Camera"
+    body = io.BytesIO()
+    image.save(body, format="PNG", exif=exif)
+    data = body.getvalue().ljust(200 * 1024, b"\0")
+
+    class Source(MemoryRangeSource):
+        def read_preview(self, maximum_bytes):
+            raise AssertionError("Decode PNG metadata from the bounded original")
+
+    source = Source(make_asset("large.png", data), data)
+    with StateStore(tmp_path) as store:
+        result = PreviewPipeline(store, CacheManager(store)).run(source)
+        assert result.preview_tag == "OriginalImage"
+        assert result.range_requests == 50
+        assert result.bytes_transferred == len(data)
+        assert result.preview_path.is_file() and result.contact_path.is_file()
+        assert store.connection.execute("SELECT camera_model FROM assets").fetchone()[0] == (
+            "Original Camera"
+        )
+
+
+@pytest.mark.parametrize("extension,limit", [
+    ("png", 256), ("tif", 128), ("tiff", 128), ("heic", 128),
+])
+def test_images_over_their_input_limit_are_rejected_before_reading(tmp_path, monkeypatch,
+                                                                 extension, limit):
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+
+    class Source:
+        asset = RemoteAsset("test", "large", f"/large.{extension}", f"large.{extension}",
+                            (limit + 1) * 1024)
+        range_requests = bytes_transferred = metadata_elapsed_ms = 0
+
+        def read_range(self, start, length):
+            raise AssertionError("The oversized original must not be downloaded")
+
+    with StateStore(tmp_path) as store:
+        with pytest.raises(ConfigurationError, match=f"{limit} MB"):
+            PreviewPipeline(store, CacheManager(store)).run(Source())
+        assert store.cache_total("preview") == 0
+
+
+@pytest.mark.parametrize("extension,image_format", [
+    ("png", "PNG"), ("tif", "TIFF"), ("tiff", "TIFF"),
+])
+def test_full_images_use_exact_chunks_and_preserve_metadata_and_cache(
+    tmp_path, monkeypatch, extension, image_format
+):
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+    image = Image.new("RGB", (40, 24), "navy")
+    exif = Image.Exif()
+    exif[272] = "Full Original Camera"
+    exif[34665] = {36867: "2026:03:30 12:34:56", 42036: "Original Lens"}
+    body = io.BytesIO()
+    image.save(body, format=image_format, exif=exif.tobytes())
+    data = body.getvalue().ljust(10 * 1024, b"\0")
+    assert len(data) == 10 * 1024
+    reads = []
+    decoded = []
+    original_open = Image.open
+
+    class Source(MemoryRangeSource):
+        def read_range(self, start, length):
+            assert length <= 4 * 1024
+            reads.append((start, length))
+            return super().read_range(start, length)
+
+        def read_preview(self, maximum_bytes):
+            raise AssertionError("Full images must retain the original metadata")
+
+    def open_original(stream, *args, **kwargs):
+        assert stream.getvalue() == data
+        decoded.append(stream.getvalue())
+        return original_open(stream, *args, **kwargs)
+
+    monkeypatch.setattr("latent.preview.Image.open", open_original)
+    source = Source(make_asset(f"original.{extension}", data), data)
+    with StateStore(tmp_path) as store:
+        pipeline = PreviewPipeline(store, CacheManager(store))
+        result = pipeline.run(source)
+        assert reads == [(0, 4096), (4096, 4096), (8192, 2048)]
+        assert decoded == [data, data]
+        assert result.range_requests == 3
+        assert result.bytes_transferred == sum(length for _, length in reads) == len(data)
+        assert result.preview_tag == "OriginalImage"
+        assert (result.preview_width, result.preview_height) == (40, 24)
+        assert (result.contact_width, result.contact_height) == (40, 24)
+        for path in (result.preview_path, result.contact_path):
+            with original_open(path) as cached:
+                assert cached.format == "JPEG" and cached.size == (40, 24)
+                cached.verify()
+        row = store.connection.execute("SELECT * FROM assets").fetchone()
+        assert row["capture_at"] == "2026:03:30 12:34:56"
+        assert row["camera_model"] == "Full Original Camera"
+        assert row["lens_model"] == "Original Lens"
+        cached = pipeline.run(source)
+        assert cached.cache_hit and cached.range_requests == cached.bytes_transferred == 0
+        assert len(reads) == 3 and len(decoded) == 2
+
+
+@pytest.mark.parametrize("extension", ["png", "tif", "tiff"])
+def test_full_image_short_middle_chunk_stops_before_decode_or_cache(
+    tmp_path, monkeypatch, extension
+):
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+    data = bytes(range(256)) * 40
+    reads = []
+
+    class Source(MemoryRangeSource):
+        def read_range(self, start, length):
+            assert length <= 4 * 1024
+            reads.append((start, length))
+            return super().read_range(start, length - 1 if start == 4096 else length)
+
+    def decode(*args, **kwargs):
+        raise AssertionError("An incomplete original must not reach the image decoder")
+
+    monkeypatch.setattr("latent.preview.Image.open", decode)
+    source = Source(make_asset(f"short.{extension}", data), data)
+    with StateStore(tmp_path) as store:
+        with pytest.raises(PreviewDecodeError, match="original could not be read completely"):
+            PreviewPipeline(store, CacheManager(store)).run(source)
+        assert reads == [(0, 4096), (4096, 4096)]
+        assert source.bytes_transferred == 8191
+        assert store.cache_total("preview") == store.cache_total("contact") == 0
+        assert store.connection.execute("SELECT count(*) FROM cache_entries").fetchone()[0] == 0
+        assert store.connection.execute("SELECT count(*) FROM fetch_runs").fetchone()[0] == 0
+
+
+def test_heif_reads_bounded_chunks_and_preserves_original_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+    data = bytes(range(256)) * 40
+    reads = []
+    decoded = []
+    metadata = {
+        "DateTimeOriginal": "2026:09:29 12:34:56",
+        "SubSecTimeOriginal": "123",
+        "OffsetTimeOriginal": "+08:00",
+        "Model": "Original HEIC Camera",
+        "Orientation": 6,
+    }
+
+    class Source(MemoryRangeSource):
+        def read_range(self, start, length):
+            assert length <= 4 * 1024
+            reads.append((start, length))
+            return super().read_range(start, length)
+
+        def read_preview(self, maximum_bytes):
+            raise AssertionError("HEIF decoding must retain the original metadata")
+
+    def decode(original, extension):
+        assert original == data
+        assert extension == "heic"
+        decoded.append(original)
+        return make_jpeg((640, 427)), metadata
+
+    monkeypatch.setattr("latent.preview.decode_heif", decode)
+    source = Source(make_asset("large.heic", data), data)
+    with StateStore(tmp_path) as store:
+        result = PreviewPipeline(store, CacheManager(store)).run(source)
+        assert reads == [(0, 4096), (4096, 4096), (8192, 2048)]
+        assert decoded == [data]
+        assert result.range_requests == 3
+        assert result.bytes_transferred == sum(length for _, length in reads) == len(data)
+        assert result.preview_tag == "HEIFImage"
+        assert (result.preview_width, result.preview_height) == (640, 427)
+        assert result.preview_path.is_file() and result.contact_path.is_file()
+        row = store.connection.execute("SELECT * FROM assets").fetchone()
+        assert row["capture_at"] == metadata["DateTimeOriginal"]
+        assert row["camera_model"] == metadata["Model"]
+        assert json.loads(row["exif_json"]) == metadata
+
+
+def test_heif_short_middle_chunk_stops_before_decode_or_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("latent.preview.MIB", 1024)
+    data = bytes(range(256)) * 40
+    reads = []
+
+    class Source(MemoryRangeSource):
+        def read_range(self, start, length):
+            assert length <= 4 * 1024
+            reads.append((start, length))
+            return super().read_range(start, length - 1 if start == 4096 else length)
+
+    def decode(*_):
+        raise AssertionError("An incomplete HEIF must not reach the decoder")
+
+    monkeypatch.setattr("latent.preview.decode_heif", decode)
+    source = Source(make_asset("short.heic", data), data)
+    with StateStore(tmp_path) as store:
+        with pytest.raises(PreviewDecodeError, match="HEIF original could not be read completely"):
+            PreviewPipeline(store, CacheManager(store)).run(source)
+        assert reads == [(0, 4096), (4096, 4096)]
+        assert source.bytes_transferred == 8191
+        assert store.cache_total("preview") == store.cache_total("contact") == 0
+        assert store.connection.execute("SELECT count(*) FROM cache_entries").fetchone()[0] == 0
+        assert store.connection.execute("SELECT count(*) FROM fetch_runs").fetchone()[0] == 0
 
 
 def test_cloud_jpeg_uses_header_and_display_ready_preview_without_full_download(tmp_path):
