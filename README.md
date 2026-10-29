@@ -120,6 +120,22 @@ uv run latent local-encoder setup --llama-server /path/to/llama-server --model-d
 Then build, validate, and activate its index in **AI Search**.
 See [local search](docs/local-embeddings.md) for the llama.cpp requirement and the validation steps.
 
+### Local preview storage
+
+Imports keeps small contact images for search and larger previews for browsing on this Mac.
+The default limits are 3 GiB for contacts, 4 GiB for previews, and 1 GiB for temporary images.
+To retain a larger library, save byte limits in `~/Library/Application Support/Latent/phase0/cache-budgets.json`, for example:
+
+```json
+{"preview": 21474836480}
+```
+
+This gives larger previews a 20 GiB budget and leaves the other limits unchanged.
+Pause an active import and restart the app before resuming it to apply changed limits.
+The cache still evicts its oldest images when a limit is reached, so allow enough space for the whole library if you want offline previews of every photo.
+Increasing a limit does not restore previews already evicted.
+The CLI `spike` and `work` commands use their own budget flags instead of this file; pass `--preview-budget-gib 20` when using them with the same catalog.
+
 ## Command line
 
 The `latent` command manages the same data as the app.

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .errors import ConfigurationError
 from .models import (
     ArchiveDirectoryJob,
     CacheEntry,
@@ -28,6 +29,27 @@ DEFAULT_CACHE_BUDGETS = {
     "preview": 4 * GIB,
     "temporary": 1 * GIB,
 }
+
+
+def load_cache_budgets(state_dir: Path) -> dict[str, int]:
+    """Read persistent byte limits; invalid settings must never trigger default eviction."""
+    path = state_dir / "cache-budgets.json"
+    try:
+        overrides = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(DEFAULT_CACHE_BUDGETS)
+    except (OSError, ValueError) as error:
+        raise ConfigurationError(f"Cannot read cache budgets: {path}") from error
+    if (
+        not isinstance(overrides, dict)
+        or overrides.keys() - DEFAULT_CACHE_BUDGETS.keys()
+        or any(type(value) is not int or value < 0 for value in overrides.values())
+    ):
+        raise ConfigurationError(
+            f"Invalid cache budgets in {path}: use contact, preview or temporary "
+            "with non-negative integer byte limits"
+        )
+    return {**DEFAULT_CACHE_BUDGETS, **overrides}
 
 
 def utc_now() -> str:
@@ -1136,9 +1158,9 @@ class CacheManager:
         budgets: Mapping[str, int] | None = None,
     ) -> None:
         self.store = store
+        self.budgets = load_cache_budgets(store.state_dir) if budgets is None else dict(budgets)
         self.root = (store.state_dir / "cache").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.budgets = dict(DEFAULT_CACHE_BUDGETS if budgets is None else budgets)
 
     def get(self, asset_id: int, variant: str, fingerprint: str) -> CacheEntry | None:
         row = self.store.get_cache_row(asset_id, variant)
